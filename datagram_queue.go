@@ -1,20 +1,21 @@
 package quic
 
 import (
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/utils"
-	"github.com/lucas-clemente/quic-go/internal/wire"
+	"context"
+	"sync"
+
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/utils"
+	"github.com/quic-go/quic-go/internal/wire"
 )
 
-type queuedDatagram struct {
-	awaitDequeue bool
-	frame        *wire.DatagramFrame
-}
-
 type datagramQueue struct {
-	sendQueue chan *queuedDatagram
-	nextFrame *queuedDatagram
-	rcvQueue  chan []byte
+	sendQueue chan *wire.DatagramFrame
+	nextFrame *wire.DatagramFrame
+
+	rcvMx    sync.Mutex
+	rcvQueue [][]byte
+	rcvd     chan struct{} // used to notify Receive that a new datagram was received
 
 	closeErr error
 	closed   chan struct{}
@@ -29,24 +30,11 @@ type datagramQueue struct {
 func newDatagramQueue(hasData func(), logger utils.Logger) *datagramQueue {
 	return &datagramQueue{
 		hasData:   hasData,
-		sendQueue: make(chan *queuedDatagram, protocol.DatagramSendQueueLen),
-		rcvQueue:  make(chan []byte, protocol.DatagramRcvQueueLen),
+		sendQueue: make(chan *wire.DatagramFrame, 1),
+		rcvd:      make(chan struct{}, 1),
 		dequeued:  make(chan struct{}),
 		closed:    make(chan struct{}),
 		logger:    logger,
-	}
-}
-
-// AddWithoutWaitForDequeue queues a new DATAGRAM frame for sending.
-// Does not block until dequeue.
-// Might block because send queue is full.
-func (h *datagramQueue) AddWithoutWaitForDequeue(f *wire.DatagramFrame) error {
-	select {
-	case h.sendQueue <- &queuedDatagram{awaitDequeue: false, frame: f}:
-		h.hasData()
-		return nil
-	case <-h.closed:
-		return h.closeErr
 	}
 }
 
@@ -54,7 +42,7 @@ func (h *datagramQueue) AddWithoutWaitForDequeue(f *wire.DatagramFrame) error {
 // It blocks until the frame has been dequeued.
 func (h *datagramQueue) AddAndWait(f *wire.DatagramFrame) error {
 	select {
-	case h.sendQueue <- &queuedDatagram{awaitDequeue: true, frame: f}:
+	case h.sendQueue <- f:
 		h.hasData()
 	case <-h.closed:
 		return h.closeErr
@@ -72,17 +60,15 @@ func (h *datagramQueue) AddAndWait(f *wire.DatagramFrame) error {
 // If actually sent out, Pop needs to be called before the next call to Peek.
 func (h *datagramQueue) Peek() *wire.DatagramFrame {
 	if h.nextFrame != nil {
-		return h.nextFrame.frame
+		return h.nextFrame
 	}
 	select {
 	case h.nextFrame = <-h.sendQueue:
-		if h.nextFrame.awaitDequeue {
-			h.dequeued <- struct{}{}
-		}
+		h.dequeued <- struct{}{}
 	default:
 		return nil
 	}
-	return h.nextFrame.frame
+	return h.nextFrame
 }
 
 func (h *datagramQueue) Pop() {
@@ -96,20 +82,41 @@ func (h *datagramQueue) Pop() {
 func (h *datagramQueue) HandleDatagramFrame(f *wire.DatagramFrame) {
 	data := make([]byte, len(f.Data))
 	copy(data, f.Data)
-	select {
-	case h.rcvQueue <- data:
-	default:
+	var queued bool
+	h.rcvMx.Lock()
+	if len(h.rcvQueue) < protocol.DatagramRcvQueueLen {
+		h.rcvQueue = append(h.rcvQueue, data)
+		queued = true
+		select {
+		case h.rcvd <- struct{}{}:
+		default:
+		}
+	}
+	h.rcvMx.Unlock()
+	if !queued && h.logger.Debug() {
 		h.logger.Debugf("Discarding DATAGRAM frame (%d bytes payload)", len(f.Data))
 	}
 }
 
 // Receive gets a received DATAGRAM frame.
-func (h *datagramQueue) Receive() ([]byte, error) {
-	select {
-	case data := <-h.rcvQueue:
-		return data, nil
-	case <-h.closed:
-		return nil, h.closeErr
+func (h *datagramQueue) Receive(ctx context.Context) ([]byte, error) {
+	for {
+		h.rcvMx.Lock()
+		if len(h.rcvQueue) > 0 {
+			data := h.rcvQueue[0]
+			h.rcvQueue = h.rcvQueue[1:]
+			h.rcvMx.Unlock()
+			return data, nil
+		}
+		h.rcvMx.Unlock()
+		select {
+		case <-h.rcvd:
+			continue
+		case <-h.closed:
+			return nil, h.closeErr
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 }
 

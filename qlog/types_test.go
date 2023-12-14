@@ -8,9 +8,9 @@ import (
 	"runtime"
 	"strconv"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/qerr"
-	"github.com/lucas-clemente/quic-go/logging"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/qerr"
+	"github.com/quic-go/quic-go/logging"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -23,10 +23,10 @@ var _ = Describe("Types", func() {
 	})
 
 	It("has a string representation for the category", func() {
-		Expect(categoryConnectivity).To(Equal("connectivity"))
-		Expect(categoryTransport).To(Equal("transport"))
-		Expect(categoryRecovery).To(Equal("recovery"))
-		Expect(categorySecurity).To(Equal("security"))
+		Expect(categoryConnectivity.String()).To(Equal("connectivity"))
+		Expect(categoryTransport.String()).To(Equal("transport"))
+		Expect(categoryRecovery.String()).To(Equal("recovery"))
+		Expect(categorySecurity.String()).To(Equal("security"))
 	})
 
 	It("has a string representation for the packet type", func() {

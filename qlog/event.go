@@ -6,10 +6,10 @@ import (
 	"net"
 	"time"
 
-	"github.com/lucas-clemente/quic-go"
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/utils"
-	"github.com/lucas-clemente/quic-go/logging"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/utils"
+	"github.com/quic-go/quic-go/logging"
 
 	"github.com/francoispqt/gojay"
 )
@@ -17,7 +17,7 @@ import (
 func milliseconds(dur time.Duration) float64 { return float64(dur.Nanoseconds()) / 1e6 }
 
 type eventDetails interface {
-	Category() string
+	Category() category
 	Name() string
 	gojay.MarshalerJSONObject
 }
@@ -32,7 +32,7 @@ var _ gojay.MarshalerJSONObject = event{}
 func (e event) IsNil() bool { return false }
 func (e event) MarshalJSONObject(enc *gojay.Encoder) {
 	enc.Float64Key("time", milliseconds(e.RelativeTime))
-	enc.StringKey("name", e.Category()+":"+e.Name())
+	enc.StringKey("name", e.Category().String()+":"+e.Name())
 	enc.ObjectKey("data", e.eventDetails)
 }
 
@@ -148,13 +148,12 @@ func (e eventConnectionClosed) MarshalJSONObject(enc *gojay.Encoder) {
 		enc.StringKey("connection_code", transportError(transportErr.ErrorCode).String())
 		enc.StringKey("reason", transportErr.ErrorMessage)
 	case errors.As(e.e, &versionNegotiationErr):
-		enc.StringKey("owner", ownerRemote.String())
-		enc.StringKey("trigger", "version_negotiation")
+		enc.StringKey("trigger", "version_mismatch")
 	}
 }
 
 type eventPacketSent struct {
-	Header        packetHeader
+	Header        gojay.MarshalerJSONObject // either a shortHeader or a packetHeader
 	Length        logging.ByteCount
 	PayloadLength logging.ByteCount
 	Frames        frames
@@ -530,30 +529,17 @@ func (e eventGeneric) MarshalJSONObject(enc *gojay.Encoder) {
 	enc.StringKey("details", e.msg)
 }
 
-type eventPathUpdated struct {
-	DestAddr *net.UDPAddr
-}
-
-func (e eventPathUpdated) Category() category { return categoryTransport }
-func (e eventPathUpdated) Name() string       { return "path_updated" }
-func (e eventPathUpdated) IsNil() bool        { return false }
-
-func (e eventPathUpdated) MarshalJSONObject(enc *gojay.Encoder) {
-	enc.StringKey("dst_ip", e.DestAddr.IP.String())
-	enc.IntKey("dst_port", e.DestAddr.Port)
-}
-
-type eventXseRecordReceived struct {
+type eventXadsRecordReceived struct {
 	streamID   logging.StreamID
 	rawLength  int
 	dataLength int
 }
 
-func (e eventXseRecordReceived) Category() category { return categoryTransport }
-func (e eventXseRecordReceived) Name() string       { return "xse_record_received" }
-func (e eventXseRecordReceived) IsNil() bool        { return false }
+func (e eventXadsRecordReceived) Category() category { return categoryTransport }
+func (e eventXadsRecordReceived) Name() string       { return "xads_record_received" }
+func (e eventXadsRecordReceived) IsNil() bool        { return false }
 
-func (e eventXseRecordReceived) MarshalJSONObject(enc *gojay.Encoder) {
+func (e eventXadsRecordReceived) MarshalJSONObject(enc *gojay.Encoder) {
 	enc.Int64Key("stream_id", int64(e.streamID))
 	enc.IntKey("raw_length", e.rawLength)
 	enc.IntKey("data_length", e.dataLength)

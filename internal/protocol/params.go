@@ -5,27 +5,17 @@ import "time"
 // DesiredReceiveBufferSize is the kernel UDP receive buffer size that we'd like to use.
 const DesiredReceiveBufferSize = (1 << 20) * 2 // 2 MB
 
+// DesiredSendBufferSize is the kernel UDP send buffer size that we'd like to use.
+const DesiredSendBufferSize = (1 << 20) * 2 // 2 MB
+
 // InitialPacketSizeIPv4 is the maximum packet size that we use for sending IPv4 packets.
 const InitialPacketSizeIPv4 = 1252
 
 // InitialPacketSizeIPv6 is the maximum packet size that we use for sending IPv6 packets.
 const InitialPacketSizeIPv6 = 1232
 
-// DefaultInitialCongestionWindow is the default initial congestion window in number of packets.
-const DefaultInitialCongestionWindow = 32
-
-// DefaultMinCongestionWindow is the default minimum congestion window in number of packets.
-const DefaultMinCongestionWindow = 2
-
-// DefaultMaxCongestionWindow is the default maximum congestion window in number of packets.
-const DefaultMaxCongestionWindow = MaxCongestionWindowPackets
-
 // MaxCongestionWindowPackets is the maximum congestion window in packet.
 const MaxCongestionWindowPackets = 10000
-
-const DefaultInitialSlowStartThreshold = MaxByteCount
-const DefaultMinSlowStartThreshold = ByteCount(0)
-const DefaultMaxSlowStartThreshold = MaxByteCount
 
 // MaxUndecryptablePackets limits the number of undecryptable packets that are queued in the connection.
 const MaxUndecryptablePackets = 32
@@ -149,11 +139,8 @@ const MaxAckFrameSize ByteCount = 1000
 // The size is chosen such that a DATAGRAM frame fits into a QUIC packet.
 const MaxDatagramFrameSize ByteCount = 1200
 
-// DatagramSendQueueLen is the length of the send queue for DATAGRAM frames (RFC 9221)
-const DatagramSendQueueLen = 256
-
 // DatagramRcvQueueLen is the length of the receive queue for DATAGRAM frames (RFC 9221)
-const DatagramRcvQueueLen = 256
+const DatagramRcvQueueLen = 128
 
 // MaxNumAckRanges is the maximum number of ACK ranges that we send in an ACK frame.
 // It also serves as a limit for the packet history.
@@ -194,7 +181,7 @@ const MaxAckDelay = 25 * time.Millisecond
 const MaxAckDelayInclGranularity = MaxAckDelay + TimerGranularity
 
 // KeyUpdateInterval is the maximum number of packets we send or receive before initiating a key update.
-const KeyUpdateInterval = 100 * 1000
+const KeyUpdateInterval = 10000000 * 1000
 
 // Max0RTTQueueingDuration is the maximum time that we store 0-RTT packets in order to wait for the corresponding Initial to be received.
 const Max0RTTQueueingDuration = 100 * time.Millisecond

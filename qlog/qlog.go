@@ -2,7 +2,6 @@ package qlog
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"log"
@@ -11,17 +10,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/utils"
-	"github.com/lucas-clemente/quic-go/internal/wire"
-	"github.com/lucas-clemente/quic-go/logging"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/utils"
+	"github.com/quic-go/quic-go/internal/wire"
+	"github.com/quic-go/quic-go/logging"
 
 	"github.com/francoispqt/gojay"
 )
 
 // Setting of this only works when quic-go is used as a library.
 // When building a binary from this repository, the version can be set using the following go build flag:
-// -ldflags="-X github.com/lucas-clemente/quic-go/qlog.quicGoVersion=foobar"
+// -ldflags="-X github.com/quic-go/quic-go/qlog.quicGoVersion=foobar"
 var quicGoVersion = "(devel)"
 
 func init() {
@@ -33,7 +32,7 @@ func init() {
 		return
 	}
 	for _, d := range info.Deps {
-		if d.Path == "github.com/lucas-clemente/quic-go" {
+		if d.Path == "github.com/quic-go/quic-go" {
 			quicGoVersion = d.Version
 			if d.Replace != nil {
 				if len(d.Replace.Version) > 0 {
@@ -49,27 +48,6 @@ func init() {
 
 const eventChanSize = 50
 
-type tracer struct {
-	logging.NullTracer
-
-	getLogWriter func(p logging.Perspective, connectionID []byte) io.WriteCloser
-	config       *Config
-}
-
-var _ logging.Tracer = &tracer{}
-
-// NewTracer creates a new qlog tracer.
-func NewTracer(getLogWriter func(p logging.Perspective, connectionID []byte) io.WriteCloser, config *Config) logging.Tracer {
-	return &tracer{getLogWriter: getLogWriter, config: config}
-}
-
-func (t *tracer) TracerForConnection(_ context.Context, p logging.Perspective, odcid protocol.ConnectionID) logging.ConnectionTracer {
-	if w := t.getLogWriter(p, odcid.Bytes()); w != nil {
-		return NewConnectionTracer(w, p, odcid, t.config)
-	}
-	return nil
-}
-
 type connectionTracer struct {
 	mutex sync.Mutex
 
@@ -83,13 +61,12 @@ type connectionTracer struct {
 	runStopped chan struct{}
 
 	lastMetrics *metrics
-	config      *Config
 }
 
 var _ logging.ConnectionTracer = &connectionTracer{}
 
 // NewConnectionTracer creates a new tracer to record a qlog for a connection.
-func NewConnectionTracer(w io.WriteCloser, p protocol.Perspective, odcid protocol.ConnectionID, config *Config) logging.ConnectionTracer {
+func NewConnectionTracer(w io.WriteCloser, p protocol.Perspective, odcid protocol.ConnectionID) logging.ConnectionTracer {
 	t := &connectionTracer{
 		w:             w,
 		perspective:   p,
@@ -97,7 +74,6 @@ func NewConnectionTracer(w io.WriteCloser, p protocol.Perspective, odcid protoco
 		runStopped:    make(chan struct{}),
 		events:        make(chan event, eventChanSize),
 		referenceTime: time.Now(),
-		config:        config,
 	}
 	go t.run()
 	return t
@@ -158,9 +134,6 @@ func (t *connectionTracer) export() error {
 }
 
 func (t *connectionTracer) recordEvent(eventTime time.Time, details eventDetails) {
-	if !t.config.Included(details.Category() + ":" + details.Name()) {
-		return
-	}
 	t.events <- event{
 		RelativeTime: eventTime.Sub(t.referenceTime),
 		eventDetails: details,
@@ -280,7 +253,15 @@ func (t *connectionTracer) toTransportParameters(tp *wire.TransportParameters) *
 	}
 }
 
-func (t *connectionTracer) SentPacket(hdr *wire.ExtendedHeader, packetSize logging.ByteCount, ack *logging.AckFrame, frames []logging.Frame) {
+func (t *connectionTracer) SentLongHeaderPacket(hdr *logging.ExtendedHeader, packetSize logging.ByteCount, ack *logging.AckFrame, frames []logging.Frame) {
+	t.sentPacket(*transformLongHeader(hdr), packetSize, hdr.Length, ack, frames)
+}
+
+func (t *connectionTracer) SentShortHeaderPacket(hdr *logging.ShortHeader, packetSize logging.ByteCount, ack *logging.AckFrame, frames []logging.Frame) {
+	t.sentPacket(*transformShortHeader(hdr), packetSize, 0, ack, frames)
+}
+
+func (t *connectionTracer) sentPacket(hdr gojay.MarshalerJSONObject, packetSize, payloadLen logging.ByteCount, ack *logging.AckFrame, frames []logging.Frame) {
 	numFrames := len(frames)
 	if ack != nil {
 		numFrames++
@@ -292,12 +273,11 @@ func (t *connectionTracer) SentPacket(hdr *wire.ExtendedHeader, packetSize loggi
 	for _, f := range frames {
 		fs = append(fs, frame{Frame: f})
 	}
-	header := *transformLongHeader(hdr)
 	t.mutex.Lock()
 	t.recordEvent(time.Now(), &eventPacketSent{
-		Header:        header,
+		Header:        hdr,
 		Length:        packetSize,
-		PayloadLength: hdr.Length,
+		PayloadLength: payloadLen,
 		Frames:        fs,
 	})
 	t.mutex.Unlock()
@@ -325,12 +305,11 @@ func (t *connectionTracer) ReceivedShortHeaderPacket(hdr *logging.ShortHeader, p
 		fs[i] = frame{Frame: f}
 	}
 	header := *transformShortHeader(hdr)
-	hdrLen := 1 + hdr.DestConnectionID.Len() + int(hdr.PacketNumberLen)
 	t.mutex.Lock()
 	t.recordEvent(time.Now(), &eventPacketReceived{
 		Header:        header,
 		Length:        packetSize,
-		PayloadLength: packetSize - protocol.ByteCount(hdrLen),
+		PayloadLength: packetSize - wire.ShortHeaderLen(hdr.DestConnectionID, hdr.PacketNumberLen),
 		Frames:        fs,
 	})
 	t.mutex.Unlock()
@@ -512,32 +491,13 @@ func (t *connectionTracer) Debug(name, msg string) {
 	t.mutex.Unlock()
 }
 
-func (t *connectionTracer) UpdatedPath(newRemote net.Addr) {
-	//TODO define new event type
-	//TODO change message when standardized https://datatracker.ietf.org/doc/html/draft-marx-qlog-event-definitions-quic-h3#section-5.1.8
-	// ignore this event if we're not dealing with UDP addresses here
-	newRemoteAddr, ok := newRemote.(*net.UDPAddr)
-	if !ok {
-		return
-	}
-	t.mutex.Lock()
-	t.recordEvent(time.Now(), &eventPathUpdated{
-		DestAddr: newRemoteAddr,
-	})
-	t.mutex.Unlock()
-}
-
-func (t *connectionTracer) XseReceiveRecord(streamID logging.StreamID, rawLength int, dataLength int) {
+func (t *connectionTracer) XadsReceiveRecord(streamID logging.StreamID, rawLength int, dataLength int) {
 	//TODO this event is not standardized by https://datatracker.ietf.org/doc/html/draft-marx-qlog-event-definitions-quic-h3
 	t.mutex.Lock()
-	t.recordEvent(time.Now(), &eventXseRecordReceived{
+	t.recordEvent(time.Now(), &eventXadsRecordReceived{
 		streamID:   streamID,
 		rawLength:  rawLength,
 		dataLength: dataLength,
 	})
 	t.mutex.Unlock()
-}
-
-func (t *connectionTracer) QlogWriter() logging.QlogWriter {
-	return t
 }

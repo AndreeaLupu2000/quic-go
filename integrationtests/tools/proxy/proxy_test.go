@@ -3,16 +3,16 @@ package quicproxy
 import (
 	"bytes"
 	"fmt"
-	"github.com/lucas-clemente/quic-go"
 	"net"
+	"runtime"
 	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/wire"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/wire"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -29,12 +29,10 @@ func isProxyRunning() bool {
 
 var _ = Describe("QUIC Proxy", func() {
 	makePacket := func(p protocol.PacketNumber, payload []byte) []byte {
-		b := &bytes.Buffer{}
 		hdr := wire.ExtendedHeader{
 			Header: wire.Header{
-				IsLongHeader:     true,
 				Type:             protocol.PacketTypeInitial,
-				Version:          protocol.VersionTLS,
+				Version:          protocol.Version1,
 				Length:           4 + protocol.ByteCount(len(payload)),
 				DestConnectionID: protocol.ParseConnectionID([]byte{0xde, 0xad, 0xbe, 0xef, 0, 0, 0x13, 0x37}),
 				SrcConnectionID:  protocol.ParseConnectionID([]byte{0xde, 0xad, 0xbe, 0xef, 0, 0, 0x13, 0x37}),
@@ -42,17 +40,17 @@ var _ = Describe("QUIC Proxy", func() {
 			PacketNumber:    p,
 			PacketNumberLen: protocol.PacketNumberLen4,
 		}
-		Expect(hdr.Write(b, protocol.VersionWhatever)).To(Succeed())
-		raw := b.Bytes()
-		raw = append(raw, payload...)
-		return raw
+		b, err := hdr.Append(nil, protocol.Version1)
+		Expect(err).ToNot(HaveOccurred())
+		b = append(b, payload...)
+		return b
 	}
 
 	readPacketNumber := func(b []byte) protocol.PacketNumber {
-		hdr, data, _, err := wire.ParsePacket(b, 0)
+		hdr, data, _, err := wire.ParsePacket(b)
 		ExpectWithOffset(1, err).ToNot(HaveOccurred())
 		Expect(hdr.Type).To(Equal(protocol.PacketTypeInitial))
-		extHdr, err := hdr.ParseExtended(bytes.NewReader(data), protocol.VersionTLS)
+		extHdr, err := hdr.ParseExtended(bytes.NewReader(data), protocol.Version1)
 		ExpectWithOffset(1, err).ToNot(HaveOccurred())
 		return extHdr.PacketNumber
 	}
@@ -70,8 +68,12 @@ var _ = Describe("QUIC Proxy", func() {
 			// check that the proxy port is in use
 			addr, err := net.ResolveUDPAddr("udp", "localhost:"+strconv.Itoa(proxy.LocalPort()))
 			Expect(err).ToNot(HaveOccurred())
-			_, err = quic.ListenMigratableUDP("udp", addr)
-			Expect(err).To(MatchError(fmt.Sprintf("listen udp 127.0.0.1:%d: bind: address already in use", proxy.LocalPort())))
+			_, err = net.ListenUDP("udp", addr)
+			if runtime.GOOS == "windows" {
+				Expect(err).To(MatchError(fmt.Sprintf("listen udp 127.0.0.1:%d: bind: Only one usage of each socket address (protocol/network address/port) is normally permitted.", proxy.LocalPort())))
+			} else {
+				Expect(err).To(MatchError(fmt.Sprintf("listen udp 127.0.0.1:%d: bind: address already in use", proxy.LocalPort())))
+			}
 			Expect(proxy.Close()).To(Succeed()) // stopping is tested in the next test
 		})
 
@@ -94,7 +96,7 @@ var _ = Describe("QUIC Proxy", func() {
 			Expect(err).ToNot(HaveOccurred())
 			// sometimes it takes a while for the OS to free the port
 			Eventually(func() error {
-				ln, err := quic.ListenMigratableUDP("udp", addr)
+				ln, err := net.ListenUDP("udp", addr)
 				if err != nil {
 					return err
 				}
@@ -107,7 +109,7 @@ var _ = Describe("QUIC Proxy", func() {
 		It("stops listening for proxied connections", func() {
 			serverAddr, err := net.ResolveUDPAddr("udp", "localhost:0")
 			Expect(err).ToNot(HaveOccurred())
-			serverConn, err := quic.ListenMigratableUDP("udp", serverAddr)
+			serverConn, err := net.ListenUDP("udp", serverAddr)
 			Expect(err).ToNot(HaveOccurred())
 			defer serverConn.Close()
 
@@ -138,7 +140,7 @@ var _ = Describe("QUIC Proxy", func() {
 
 	Context("Proxy tests", func() {
 		var (
-			serverConn            *quic.MigratableUDPConn
+			serverConn            *net.UDPConn
 			serverNumPacketsSent  int32
 			serverReceivedPackets chan packetData
 			clientConn            *net.UDPConn
@@ -163,7 +165,7 @@ var _ = Describe("QUIC Proxy", func() {
 			// in production this would be a QUIC server
 			raddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 			Expect(err).ToNot(HaveOccurred())
-			serverConn, err = quic.ListenMigratableUDP("udp", raddr)
+			serverConn, err = net.ListenUDP("udp", raddr)
 			Expect(err).ToNot(HaveOccurred())
 
 			go func() {

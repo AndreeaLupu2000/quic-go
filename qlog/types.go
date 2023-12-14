@@ -3,9 +3,9 @@ package qlog
 import (
 	"fmt"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/qerr"
-	"github.com/lucas-clemente/quic-go/logging"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/qerr"
+	"github.com/quic-go/quic-go/logging"
 )
 
 type owner uint8
@@ -40,14 +40,29 @@ func (s streamType) String() string {
 }
 
 // category is the qlog event category.
-type category = string
+type category uint8
 
 const (
-	categoryConnectivity category = "connectivity"
-	categoryTransport             = "transport"
-	categorySecurity              = "security"
-	categoryRecovery              = "recovery"
+	categoryConnectivity category = iota
+	categoryTransport
+	categorySecurity
+	categoryRecovery
 )
+
+func (c category) String() string {
+	switch c {
+	case categoryConnectivity:
+		return "connectivity"
+	case categoryTransport:
+		return "transport"
+	case categorySecurity:
+		return "security"
+	case categoryRecovery:
+		return "recovery"
+	default:
+		return "unknown category"
+	}
+}
 
 type versionNumber protocol.VersionNumber
 

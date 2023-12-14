@@ -2,7 +2,6 @@ package qlog
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,11 +10,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/lucas-clemente/quic-go"
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/qerr"
-	"github.com/lucas-clemente/quic-go/internal/utils"
-	"github.com/lucas-clemente/quic-go/logging"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/qerr"
+	"github.com/quic-go/quic-go/internal/utils"
+	"github.com/quic-go/quic-go/logging"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -51,24 +50,12 @@ type entry struct {
 }
 
 var _ = Describe("Tracing", func() {
-	Context("tracer", func() {
-		It("returns nil when there's no io.WriteCloser", func() {
-			t := NewTracer(func(logging.Perspective, []byte) io.WriteCloser { return nil }, &Config{})
-			Expect(t.TracerForConnection(
-				context.Background(),
-				logging.PerspectiveClient,
-				protocol.ParseConnectionID([]byte{1, 2, 3, 4}),
-			)).To(BeNil())
-		})
-	})
-
 	It("stops writing when encountering an error", func() {
 		buf := &bytes.Buffer{}
 		t := NewConnectionTracer(
 			&limitedWriter{WriteCloser: nopWriteCloser(buf), N: 250},
 			protocol.PerspectiveServer,
 			protocol.ParseConnectionID([]byte{0xde, 0xad, 0xbe, 0xef}),
-			&Config{},
 		)
 		for i := uint32(0); i < 1000; i++ {
 			t.UpdatedPTOCount(i)
@@ -89,9 +76,8 @@ var _ = Describe("Tracing", func() {
 
 		BeforeEach(func() {
 			buf = &bytes.Buffer{}
-			t := NewTracer(func(logging.Perspective, []byte) io.WriteCloser { return nopWriteCloser(buf) }, &Config{})
-			tracer = t.TracerForConnection(
-				context.Background(),
+			tracer = NewConnectionTracer(
+				nopWriteCloser(buf),
 				logging.PerspectiveServer,
 				protocol.ParseConnectionID([]byte{0xde, 0xad, 0xbe, 0xef}),
 			)
@@ -246,9 +232,8 @@ var _ = Describe("Tracing", func() {
 				Expect(entry.Time).To(BeTemporally("~", time.Now(), scaleDuration(10*time.Millisecond)))
 				Expect(entry.Name).To(Equal("transport:connection_closed"))
 				ev := entry.Event
-				Expect(ev).To(HaveLen(2))
-				Expect(ev).To(HaveKeyWithValue("owner", "remote"))
-				Expect(ev).To(HaveKeyWithValue("trigger", "version_negotiation"))
+				Expect(ev).To(HaveLen(1))
+				Expect(ev).To(HaveKeyWithValue("trigger", "version_mismatch"))
 			})
 
 			It("records application errors", func() {
@@ -421,16 +406,15 @@ var _ = Describe("Tracing", func() {
 				Expect(ev).To(HaveKeyWithValue("initial_max_stream_data_uni", float64(300)))
 			})
 
-			It("records a sent packet, without an ACK", func() {
-				tracer.SentPacket(
+			It("records a sent long header packet, without an ACK", func() {
+				tracer.SentLongHeaderPacket(
 					&logging.ExtendedHeader{
 						Header: logging.Header{
-							IsLongHeader:     true,
 							Type:             protocol.PacketTypeHandshake,
 							DestConnectionID: protocol.ParseConnectionID([]byte{1, 2, 3, 4, 5, 6, 7, 8}),
 							SrcConnectionID:  protocol.ParseConnectionID([]byte{4, 3, 2, 1}),
 							Length:           1337,
-							Version:          protocol.VersionTLS,
+							Version:          protocol.Version1,
 						},
 						PacketNumber: 1337,
 					},
@@ -461,11 +445,11 @@ var _ = Describe("Tracing", func() {
 				Expect(frames[1].(map[string]interface{})).To(HaveKeyWithValue("frame_type", "stream"))
 			})
 
-			It("records a sent packet, without an ACK", func() {
-				tracer.SentPacket(
-					&logging.ExtendedHeader{
-						Header:       logging.Header{DestConnectionID: protocol.ParseConnectionID([]byte{1, 2, 3, 4})},
-						PacketNumber: 1337,
+			It("records a sent short header packet, without an ACK", func() {
+				tracer.SentShortHeaderPacket(
+					&logging.ShortHeader{
+						DestConnectionID: protocol.ParseConnectionID([]byte{1, 2, 3, 4}),
+						PacketNumber:     1337,
 					},
 					123,
 					&logging.AckFrame{AckRanges: []logging.AckRange{{Smallest: 1, Largest: 10}}},
@@ -491,13 +475,12 @@ var _ = Describe("Tracing", func() {
 				tracer.ReceivedLongHeaderPacket(
 					&logging.ExtendedHeader{
 						Header: logging.Header{
-							IsLongHeader:     true,
 							Type:             protocol.PacketTypeInitial,
 							DestConnectionID: protocol.ParseConnectionID([]byte{1, 2, 3, 4, 5, 6, 7, 8}),
 							SrcConnectionID:  protocol.ParseConnectionID([]byte{4, 3, 2, 1}),
 							Token:            []byte{0xde, 0xad, 0xbe, 0xef},
 							Length:           1234,
-							Version:          protocol.VersionTLS,
+							Version:          protocol.Version1,
 						},
 						PacketNumber: 1337,
 					},
@@ -562,12 +545,11 @@ var _ = Describe("Tracing", func() {
 			It("records a received Retry packet", func() {
 				tracer.ReceivedRetry(
 					&logging.Header{
-						IsLongHeader:     true,
 						Type:             protocol.PacketTypeRetry,
 						DestConnectionID: protocol.ParseConnectionID([]byte{1, 2, 3, 4, 5, 6, 7, 8}),
 						SrcConnectionID:  protocol.ParseConnectionID([]byte{4, 3, 2, 1}),
 						Token:            []byte{0xde, 0xad, 0xbe, 0xef},
-						Version:          protocol.VersionTLS,
+						Version:          protocol.Version1,
 					},
 				)
 				entry := exportAndParseSingle()

@@ -1,19 +1,17 @@
 package quic
 
 import (
-	"errors"
+	"fmt"
 	"net"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/utils"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/utils"
+	"github.com/quic-go/quic-go/quicvarint"
 )
 
 // Clone clones a Config
 func (c *Config) Clone() *Config {
-	if c == nil {
-		return nil
-	}
 	copy := *c
 	return &copy
 }
@@ -26,11 +24,24 @@ func validateConfig(config *Config) error {
 	if config == nil {
 		return nil
 	}
-	if config.MaxIncomingStreams > 1<<60 {
-		return errors.New("invalid value for Config.MaxIncomingStreams")
+	const maxStreams = 1 << 60
+	if config.MaxIncomingStreams > maxStreams {
+		config.MaxIncomingStreams = maxStreams
 	}
-	if config.MaxIncomingUniStreams > 1<<60 {
-		return errors.New("invalid value for Config.MaxIncomingUniStreams")
+	if config.MaxIncomingUniStreams > maxStreams {
+		config.MaxIncomingUniStreams = maxStreams
+	}
+	if config.MaxStreamReceiveWindow > quicvarint.Max {
+		config.MaxStreamReceiveWindow = quicvarint.Max
+	}
+	if config.MaxConnectionReceiveWindow > quicvarint.Max {
+		config.MaxConnectionReceiveWindow = quicvarint.Max
+	}
+	// check that all QUIC versions are actually supported
+	for _, v := range config.Versions {
+		if !protocol.IsValidVersion(v) {
+			return fmt.Errorf("invalid QUIC version: %s", v)
+		}
 	}
 	return nil
 }
@@ -38,7 +49,7 @@ func validateConfig(config *Config) error {
 // populateServerConfig populates fields in the quic.Config with their default values, if none are set
 // it may be called with nil
 func populateServerConfig(config *Config) *Config {
-	config = populateConfig(config, protocol.DefaultConnectionIDLength)
+	config = populateConfig(config)
 	if config.MaxTokenAge == 0 {
 		config.MaxTokenAge = protocol.TokenValidity
 	}
@@ -48,38 +59,18 @@ func populateServerConfig(config *Config) *Config {
 	if config.RequireAddressValidation == nil {
 		config.RequireAddressValidation = func(net.Addr) bool { return false }
 	}
-	if config.LoggerPrefix == "" {
-		config.LoggerPrefix = "server"
-	}
 	return config
 }
 
-// populateClientConfig populates fields in the quic.Config with their default values, if none are set
+// populateConfig populates fields in the quic.Config with their default values, if none are set
 // it may be called with nil
-func populateClientConfig(config *Config, createdPacketConn bool) *Config {
-	defaultConnIDLen := protocol.DefaultConnectionIDLength
-	if createdPacketConn {
-		defaultConnIDLen = 0
-	}
-
-	config = populateConfig(config, defaultConnIDLen)
-	if config.LoggerPrefix == "" {
-		config.LoggerPrefix = "client"
-	}
-	return config
-}
-
-func populateConfig(config *Config, defaultConnIDLen int) *Config {
+func populateConfig(config *Config) *Config {
 	if config == nil {
 		config = &Config{}
 	}
 	versions := config.Versions
 	if len(versions) == 0 {
 		versions = protocol.SupportedVersions
-	}
-	conIDLen := config.ConnectionIDLength
-	if config.ConnectionIDLength == 0 {
-		conIDLen = defaultConnIDLen
 	}
 	handshakeIdleTimeout := protocol.DefaultHandshakeIdleTimeout
 	if config.HandshakeIdleTimeout != 0 {
@@ -117,42 +108,9 @@ func populateConfig(config *Config, defaultConnIDLen int) *Config {
 	} else if maxIncomingUniStreams < 0 {
 		maxIncomingUniStreams = 0
 	}
-	connIDGenerator := config.ConnectionIDGenerator
-	if connIDGenerator == nil {
-		connIDGenerator = &protocol.DefaultConnectionIDGenerator{ConnLen: conIDLen}
-	}
-	minCongestionWindow := config.MinCongestionWindow
-	if minCongestionWindow == 0 {
-		minCongestionWindow = protocol.DefaultMinCongestionWindow
-	}
-	maxCongestionWindow := config.MaxCongestionWindow
-	if maxCongestionWindow == 0 {
-		maxCongestionWindow = protocol.DefaultMaxCongestionWindow
-	}
-	initialCongestionWindow := config.InitialCongestionWindow
-	if initialCongestionWindow == 0 {
-		initialCongestionWindow = protocol.DefaultInitialCongestionWindow
-	}
-	if initialCongestionWindow < minCongestionWindow {
-		initialCongestionWindow = minCongestionWindow
-	}
-	if initialCongestionWindow > maxCongestionWindow {
-		initialCongestionWindow = maxCongestionWindow
-	}
-	initialSlowStartThreshold := config.InitialSlowStartThreshold
-	if initialSlowStartThreshold == 0 {
-		initialSlowStartThreshold = protocol.DefaultInitialSlowStartThreshold
-	}
-	minSlowStartThreshold := config.MinSlowStartThreshold
-	if minSlowStartThreshold == 0 {
-		minSlowStartThreshold = protocol.DefaultMinSlowStartThreshold
-	}
-	maxSlowStartThreshold := config.MaxSlowStartThreshold
-	if maxSlowStartThreshold == 0 {
-		maxSlowStartThreshold = protocol.DefaultMaxSlowStartThreshold
-	}
 
 	return &Config{
+		GetConfigForClient:               config.GetConfigForClient,
 		Versions:                         versions,
 		HandshakeIdleTimeout:             handshakeIdleTimeout,
 		MaxIdleTimeout:                   idleTimeout,
@@ -167,29 +125,18 @@ func populateConfig(config *Config, defaultConnIDLen int) *Config {
 		AllowConnectionWindowIncrease:    config.AllowConnectionWindowIncrease,
 		MaxIncomingStreams:               maxIncomingStreams,
 		MaxIncomingUniStreams:            maxIncomingUniStreams,
-		ConnectionIDLength:               conIDLen,
-		ConnectionIDGenerator:            connIDGenerator,
-		StatelessResetKey:                config.StatelessResetKey,
 		TokenStore:                       config.TokenStore,
 		EnableDatagrams:                  config.EnableDatagrams,
 		DisablePathMTUDiscovery:          config.DisablePathMTUDiscovery,
 		DisableVersionNegotiationPackets: config.DisableVersionNegotiationPackets,
+		Allow0RTT:                        config.Allow0RTT,
 		Tracer:                           config.Tracer,
-		IgnoreReceived1RTTPacketsUntilFirstPathMigration: config.IgnoreReceived1RTTPacketsUntilFirstPathMigration,
-		LoggerPrefix:                   config.LoggerPrefix,
-		EnableActiveMigration:          config.EnableActiveMigration,
-		ProxyConf:                      config.ProxyConf,
-		InitialCongestionWindow:        initialCongestionWindow,
-		MinCongestionWindow:            minCongestionWindow,
-		MaxCongestionWindow:            maxCongestionWindow,
-		InitialSlowStartThreshold:      initialSlowStartThreshold,
-		MinSlowStartThreshold:          minSlowStartThreshold,
-		MaxSlowStartThreshold:          maxSlowStartThreshold,
-		ExtraStreamEncryption:          config.ExtraStreamEncryption,
-		HyblaWestwoodCongestionControl: config.HyblaWestwoodCongestionControl,
-		AllowEarlyHandover:             config.AllowEarlyHandover,
-		FixedPTO:                       config.FixedPTO,
-		//TODO should be configured on a connHandler level
-		HandleUnknownConnectionPacket: config.HandleUnknownConnectionPacket,
+		Experimental:                     populateExperimentalConfig(config.Experimental),
+	}
+}
+
+func populateExperimentalConfig(config ExperimentalConfig) ExperimentalConfig {
+	return ExperimentalConfig{
+		ExtraApplicationDataSecurity: config.ExtraApplicationDataSecurity,
 	}
 }

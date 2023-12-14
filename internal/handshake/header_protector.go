@@ -9,15 +9,12 @@ import (
 
 	"golang.org/x/crypto/chacha20"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/qtls"
+	"github.com/quic-go/quic-go/internal/protocol"
 )
 
 type headerProtector interface {
 	EncryptHeader(sample []byte, firstByte *byte, hdrBytes []byte)
 	DecryptHeader(sample []byte, firstByte *byte, hdrBytes []byte)
-	// GetHeaderProtectionKey is used by H-QUIC handover
-	GetHeaderProtectionKey() []byte
 }
 
 func hkdfHeaderProtectionLabel(v protocol.VersionNumber) string {
@@ -27,7 +24,7 @@ func hkdfHeaderProtectionLabel(v protocol.VersionNumber) string {
 	return "quic hp"
 }
 
-func newHeaderProtector(suite *qtls.CipherSuiteTLS13, trafficSecret []byte, isLongHeader bool, v protocol.VersionNumber) headerProtector {
+func newHeaderProtector(suite *cipherSuite, trafficSecret []byte, isLongHeader bool, v protocol.VersionNumber) headerProtector {
 	hkdfLabel := hkdfHeaderProtectionLabel(v)
 	switch suite.ID {
 	case tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384:
@@ -39,32 +36,16 @@ func newHeaderProtector(suite *qtls.CipherSuiteTLS13, trafficSecret []byte, isLo
 	}
 }
 
-func newHeaderProtectorFromHeaderProtectionKey(suite *qtls.CipherSuiteTLS13, hpKey []byte, isLongHeader bool) headerProtector {
-	switch suite.ID {
-	case tls.TLS_AES_128_GCM_SHA256, tls.TLS_AES_256_GCM_SHA384:
-		return newAESHeaderProtectorFromHeaderProtectionKey(hpKey, isLongHeader)
-	case tls.TLS_CHACHA20_POLY1305_SHA256:
-		return newChaChaHeaderProtectorFromHeaderProtectionKey(hpKey, isLongHeader)
-	default:
-		panic(fmt.Sprintf("Invalid cipher suite id: %d", suite.ID))
-	}
-}
-
 type aesHeaderProtector struct {
 	mask         []byte
 	block        cipher.Block
 	isLongHeader bool
-	hpKey        []byte
 }
 
 var _ headerProtector = &aesHeaderProtector{}
 
-func newAESHeaderProtector(suite *qtls.CipherSuiteTLS13, trafficSecret []byte, isLongHeader bool, hkdfLabel string) headerProtector {
+func newAESHeaderProtector(suite *cipherSuite, trafficSecret []byte, isLongHeader bool, hkdfLabel string) headerProtector {
 	hpKey := hkdfExpandLabel(suite.Hash, trafficSecret, []byte{}, hkdfLabel, suite.KeyLen)
-	return newAESHeaderProtectorFromHeaderProtectionKey(hpKey, isLongHeader)
-}
-
-func newAESHeaderProtectorFromHeaderProtectionKey(hpKey []byte, isLongHeader bool) headerProtector {
 	block, err := aes.NewCipher(hpKey)
 	if err != nil {
 		panic(fmt.Sprintf("error creating new AES cipher: %s", err))
@@ -73,7 +54,6 @@ func newAESHeaderProtectorFromHeaderProtectionKey(hpKey []byte, isLongHeader boo
 		block:        block,
 		mask:         make([]byte, block.BlockSize()),
 		isLongHeader: isLongHeader,
-		hpKey:        hpKey,
 	}
 }
 
@@ -83,10 +63,6 @@ func (p *aesHeaderProtector) DecryptHeader(sample []byte, firstByte *byte, hdrBy
 
 func (p *aesHeaderProtector) EncryptHeader(sample []byte, firstByte *byte, hdrBytes []byte) {
 	p.apply(sample, firstByte, hdrBytes)
-}
-
-func (p *aesHeaderProtector) GetHeaderProtectionKey() []byte {
-	return p.hpKey
 }
 
 func (p *aesHeaderProtector) apply(sample []byte, firstByte *byte, hdrBytes []byte) {
@@ -113,12 +89,9 @@ type chachaHeaderProtector struct {
 
 var _ headerProtector = &chachaHeaderProtector{}
 
-func newChaChaHeaderProtector(suite *qtls.CipherSuiteTLS13, trafficSecret []byte, isLongHeader bool, hkdfLabel string) headerProtector {
+func newChaChaHeaderProtector(suite *cipherSuite, trafficSecret []byte, isLongHeader bool, hkdfLabel string) headerProtector {
 	hpKey := hkdfExpandLabel(suite.Hash, trafficSecret, []byte{}, hkdfLabel, suite.KeyLen)
-	return newChaChaHeaderProtectorFromHeaderProtectionKey(hpKey, isLongHeader)
-}
 
-func newChaChaHeaderProtectorFromHeaderProtectionKey(hpKey []byte, isLongHeader bool) headerProtector {
 	p := &chachaHeaderProtector{
 		isLongHeader: isLongHeader,
 	}
@@ -132,10 +105,6 @@ func (p *chachaHeaderProtector) DecryptHeader(sample []byte, firstByte *byte, hd
 
 func (p *chachaHeaderProtector) EncryptHeader(sample []byte, firstByte *byte, hdrBytes []byte) {
 	p.apply(sample, firstByte, hdrBytes)
-}
-
-func (p *chachaHeaderProtector) GetHeaderProtectionKey() []byte {
-	return p.key[:]
 }
 
 func (p *chachaHeaderProtector) apply(sample []byte, firstByte *byte, hdrBytes []byte) {

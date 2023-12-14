@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -58,20 +57,6 @@ func ParseConnectionID(b []byte) ConnectionID {
 	return c
 }
 
-// ParseConnectionIDHex interprets hexadecimal string as a Connection ID.
-// It panics if b is longer than 20 bytes.
-// if h is emptyConnectionIDString return ConnectionID with length 0
-func ParseConnectionIDHex(h string) (ConnectionID, error) {
-	if h == emptyConnectionIDString {
-		return ConnectionID{}, nil
-	}
-	bytes, err := hex.DecodeString(h)
-	if err != nil {
-		return ConnectionID{}, err
-	}
-	return ParseConnectionID(bytes), nil
-}
-
 // GenerateConnectionIDForInitial generates a connection ID for the Initial packet.
 // It uses a length randomly chosen between 8 and 20 bytes.
 func GenerateConnectionIDForInitial() (ConnectionID, error) {
@@ -111,17 +96,11 @@ func (c ConnectionID) Bytes() []byte {
 	return c.b[:c.l]
 }
 
-const emptyConnectionIDString = "(empty)"
-
 func (c ConnectionID) String() string {
 	if c.Len() == 0 {
-		return emptyConnectionIDString
+		return "(empty)"
 	}
 	return fmt.Sprintf("%x", c.Bytes())
-}
-
-func (c ConnectionID) Equal(other ConnectionID) bool {
-	return c.l == other.l && c.b == other.b
 }
 
 type DefaultConnectionIDGenerator struct {

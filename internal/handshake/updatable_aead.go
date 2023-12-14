@@ -6,29 +6,30 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
-	"github.com/lucas-clemente/quic-go/handover"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/qerr"
-	"github.com/lucas-clemente/quic-go/internal/qtls"
-	"github.com/lucas-clemente/quic-go/internal/utils"
-	"github.com/lucas-clemente/quic-go/logging"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/qerr"
+	"github.com/quic-go/quic-go/internal/utils"
+	"github.com/quic-go/quic-go/logging"
 )
 
 // KeyUpdateInterval is the maximum number of packets we send or receive before initiating a key update.
 // It's a package-level variable to allow modifying it for testing purposes.
 var KeyUpdateInterval uint64 = protocol.KeyUpdateInterval
 
+// FirstKeyUpdateInterval is the maximum number of packets we send or receive before initiating the first key update.
+// It's a package-level variable to allow modifying it for testing purposes.
+var FirstKeyUpdateInterval uint64 = 0
+
 type updatableAEAD struct {
-	suite *qtls.CipherSuiteTLS13
+	suite *cipherSuite
 
 	keyPhase           protocol.KeyPhase
 	largestAcked       protocol.PacketNumber
 	firstPacketNumber  protocol.PacketNumber
 	handshakeConfirmed bool
 
-	keyUpdateInterval  uint64
 	invalidPacketLimit uint64
 	invalidPacketCount uint64
 
@@ -41,13 +42,13 @@ type updatableAEAD struct {
 	highestRcvdPN           protocol.PacketNumber // highest packet number received (which could be successfully unprotected)
 	numRcvdWithCurrentKey   uint64
 	numSentWithCurrentKey   uint64
-	rcvAEAD                 RecreatableAEAD
-	sendAEAD                RecreatableAEAD
+	rcvAEAD                 cipher.AEAD
+	sendAEAD                cipher.AEAD
 	// caches cipher.AEAD.Overhead(). This speeds up calls to Overhead().
 	aeadOverhead int
 
-	nextRcvAEAD           RecreatableAEAD
-	nextSendAEAD          RecreatableAEAD
+	nextRcvAEAD           cipher.AEAD
+	nextSendAEAD          cipher.AEAD
 	nextRcvTrafficSecret  []byte
 	nextSendTrafficSecret []byte
 
@@ -75,7 +76,6 @@ func newUpdatableAEAD(rttStats *utils.RTTStats, tracer logging.ConnectionTracer,
 		largestAcked:            protocol.InvalidPacketNumber,
 		firstRcvdWithCurrentKey: protocol.InvalidPacketNumber,
 		firstSentWithCurrentKey: protocol.InvalidPacketNumber,
-		keyUpdateInterval:       KeyUpdateInterval,
 		rttStats:                rttStats,
 		tracer:                  tracer,
 		logger:                  logger,
@@ -103,8 +103,8 @@ func (a *updatableAEAD) rollKeys() {
 
 	a.nextRcvTrafficSecret = a.getNextTrafficSecret(a.suite.Hash, a.nextRcvTrafficSecret)
 	a.nextSendTrafficSecret = a.getNextTrafficSecret(a.suite.Hash, a.nextSendTrafficSecret)
-	a.nextRcvAEAD = NewRecreatableAEAD(a.suite, a.nextRcvTrafficSecret, a.version)
-	a.nextSendAEAD = NewRecreatableAEAD(a.suite, a.nextSendTrafficSecret, a.version)
+	a.nextRcvAEAD = createAEAD(a.suite, a.nextRcvTrafficSecret, a.version)
+	a.nextSendAEAD = createAEAD(a.suite, a.nextSendTrafficSecret, a.version)
 }
 
 func (a *updatableAEAD) startKeyDropTimer(now time.Time) {
@@ -117,33 +117,35 @@ func (a *updatableAEAD) getNextTrafficSecret(hash crypto.Hash, ts []byte) []byte
 	return hkdfExpandLabel(hash, ts, []byte{}, "quic ku", hash.Size())
 }
 
+// SetReadKey sets the read key.
 // For the client, this function is called before SetWriteKey.
 // For the server, this function is called after SetWriteKey.
-func (a *updatableAEAD) SetReadKey(suite *qtls.CipherSuiteTLS13, trafficSecret []byte) {
-	a.rcvAEAD = NewRecreatableAEAD(suite, trafficSecret, a.version)
+func (a *updatableAEAD) SetReadKey(suite *cipherSuite, trafficSecret []byte) {
+	a.rcvAEAD = createAEAD(suite, trafficSecret, a.version)
 	a.headerDecrypter = newHeaderProtector(suite, trafficSecret, false, a.version)
 	if a.suite == nil {
 		a.setAEADParameters(a.rcvAEAD, suite)
 	}
 
 	a.nextRcvTrafficSecret = a.getNextTrafficSecret(suite.Hash, trafficSecret)
-	a.nextRcvAEAD = NewRecreatableAEAD(suite, a.nextRcvTrafficSecret, a.version)
+	a.nextRcvAEAD = createAEAD(suite, a.nextRcvTrafficSecret, a.version)
 }
 
+// SetWriteKey sets the write key.
 // For the client, this function is called after SetReadKey.
 // For the server, this function is called before SetWriteKey.
-func (a *updatableAEAD) SetWriteKey(suite *qtls.CipherSuiteTLS13, trafficSecret []byte) {
-	a.sendAEAD = NewRecreatableAEAD(suite, trafficSecret, a.version)
+func (a *updatableAEAD) SetWriteKey(suite *cipherSuite, trafficSecret []byte) {
+	a.sendAEAD = createAEAD(suite, trafficSecret, a.version)
 	a.headerEncrypter = newHeaderProtector(suite, trafficSecret, false, a.version)
 	if a.suite == nil {
 		a.setAEADParameters(a.sendAEAD, suite)
 	}
 
 	a.nextSendTrafficSecret = a.getNextTrafficSecret(suite.Hash, trafficSecret)
-	a.nextSendAEAD = NewRecreatableAEAD(suite, a.nextSendTrafficSecret, a.version)
+	a.nextSendAEAD = createAEAD(suite, a.nextSendTrafficSecret, a.version)
 }
 
-func (a *updatableAEAD) setAEADParameters(aead cipher.AEAD, suite *qtls.CipherSuiteTLS13) {
+func (a *updatableAEAD) setAEADParameters(aead cipher.AEAD, suite *cipherSuite) {
 	a.nonceBuf = make([]byte, aead.NonceSize())
 	a.aeadOverhead = aead.Overhead()
 	a.suite = suite
@@ -157,8 +159,20 @@ func (a *updatableAEAD) setAEADParameters(aead cipher.AEAD, suite *qtls.CipherSu
 	}
 }
 
+var highestRcvPN protocol.PacketNumber = protocol.PacketNumber(0)
+var ReceivedUnecryptedPackets bool
+
+// It calculates the packet number correctly after the definition of the RFC 9000.
+// Because the cryptographic functions are not accessed when uncrypted packets are sent
+// we must update a.highestRcvdPN here.
 func (a *updatableAEAD) DecodePacketNumber(wirePN protocol.PacketNumber, wirePNLen protocol.PacketNumberLen) protocol.PacketNumber {
-	return protocol.DecodePacketNumber(wirePNLen, a.highestRcvdPN, wirePN)
+	if ReceivedUnecryptedPackets {
+		highestRcvPN = protocol.DecodePacketNumber(wirePNLen, a.highestRcvdPN, wirePN)
+		a.highestRcvdPN = utils.Max(a.highestRcvdPN, highestRcvPN)
+		return highestRcvPN
+	} else {
+		return protocol.DecodePacketNumber(wirePNLen, a.highestRcvdPN, wirePN)
+	}
 }
 
 func (a *updatableAEAD) Open(dst, src []byte, rcvTime time.Time, pn protocol.PacketNumber, kp protocol.KeyPhaseBit, ad []byte) ([]byte, error) {
@@ -285,11 +299,17 @@ func (a *updatableAEAD) shouldInitiateKeyUpdate() bool {
 	if !a.updateAllowed() {
 		return false
 	}
-	if a.numRcvdWithCurrentKey >= a.keyUpdateInterval {
+	// Initiate the first key update shortly after the handshake, in order to exercise the key update mechanism.
+	if a.keyPhase == 0 {
+		if a.numRcvdWithCurrentKey >= FirstKeyUpdateInterval || a.numSentWithCurrentKey >= FirstKeyUpdateInterval {
+			return true
+		}
+	}
+	if a.numRcvdWithCurrentKey >= KeyUpdateInterval {
 		a.logger.Debugf("Received %d packets with current key phase. Initiating key update to the next key phase: %d", a.numRcvdWithCurrentKey, a.keyPhase+1)
 		return true
 	}
-	if a.numSentWithCurrentKey >= a.keyUpdateInterval {
+	if a.numSentWithCurrentKey >= KeyUpdateInterval {
 		a.logger.Debugf("Sent %d packets with current key phase. Initiating key update to the next key phase: %d", a.numSentWithCurrentKey, a.keyPhase+1)
 		return true
 	}
@@ -321,42 +341,4 @@ func (a *updatableAEAD) DecryptHeader(sample []byte, firstByte *byte, hdrBytes [
 
 func (a *updatableAEAD) FirstPacketNumber() protocol.PacketNumber {
 	return a.firstPacketNumber
-}
-
-func (a *updatableAEAD) store(s *handover.State, p protocol.Perspective) {
-	s.KeyPhase = a.keyPhase
-	s.CipherSuiteId = a.suite.ID
-	s.SetReceiveHeaderProtectionKey(p, a.headerDecrypter.GetHeaderProtectionKey())
-	s.SetSendHeaderProtectionKey(p, a.headerEncrypter.GetHeaderProtectionKey())
-	s.SetReceiveTrafficSecret(p, a.rcvAEAD.TrafficSecret())
-	s.SetSendTrafficSecret(p, a.sendAEAD.TrafficSecret())
-}
-
-func restoreUpdatableAEAD(state handover.State, perspective protocol.Perspective, rttStats *utils.RTTStats, tracer logging.ConnectionTracer, logger utils.Logger) *updatableAEAD {
-	a := newUpdatableAEAD(
-		rttStats,
-		tracer,
-		logger,
-		state.Version,
-	)
-
-	a.keyPhase = state.KeyPhase
-	a.highestRcvdPN = state.HighestSentPacketNumber(perspective.Opposite())
-	suite := qtls.CipherSuiteTLS13ByID(state.CipherSuiteId)
-
-	a.rcvAEAD = NewRecreatableAEAD(suite, state.ReceiveTrafficSecret(perspective), a.version)
-	a.headerDecrypter = newHeaderProtectorFromHeaderProtectionKey(suite, state.ReceiveHeaderProtectionKey(perspective), false)
-	a.sendAEAD = NewRecreatableAEAD(suite, state.SendTrafficSecret(perspective), a.version)
-	a.headerEncrypter = newHeaderProtectorFromHeaderProtectionKey(suite, state.SendHeaderProtectionKey(perspective), false)
-	if perspective == protocol.PerspectiveClient {
-		a.setAEADParameters(a.rcvAEAD, suite)
-	} else {
-		a.setAEADParameters(a.sendAEAD, suite)
-	}
-	a.nextRcvTrafficSecret = a.getNextTrafficSecret(suite.Hash, state.ReceiveTrafficSecret(perspective))
-	a.nextRcvAEAD = NewRecreatableAEAD(suite, a.nextRcvTrafficSecret, a.version)
-	a.nextSendTrafficSecret = a.getNextTrafficSecret(suite.Hash, state.SendTrafficSecret(perspective))
-	a.nextSendAEAD = NewRecreatableAEAD(suite, a.nextSendTrafficSecret, a.version)
-
-	return a
 }

@@ -2,12 +2,20 @@ package qerr
 
 import (
 	"errors"
+	"fmt"
 	"net"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/protocol"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
+
+type myError int
+
+var _ error = myError(0)
+
+func (e myError) Error() string { return fmt.Sprintf("my error %d", e) }
 
 var _ = Describe("QUIC Errors", func() {
 	Context("Transport Errors", func() {
@@ -40,12 +48,20 @@ var _ = Describe("QUIC Errors", func() {
 
 		Context("crypto errors", func() {
 			It("has a string representation for errors with a message", func() {
-				err := NewLocalCryptoError(0x42, "foobar")
-				Expect(err.Error()).To(Equal("CRYPTO_ERROR 0x142 (local): foobar"))
+				myErr := myError(1337)
+				err := NewLocalCryptoError(0x42, myErr)
+				Expect(err.Error()).To(Equal("CRYPTO_ERROR 0x142 (local): my error 1337"))
+			})
+
+			It("unwraps errors", func() {
+				var myErr myError
+				err := NewLocalCryptoError(0x42, myError(1337))
+				Expect(errors.As(err, &myErr)).To(BeTrue())
+				Expect(myErr).To(BeEquivalentTo(1337))
 			})
 
 			It("has a string representation for errors without a message", func() {
-				err := NewLocalCryptoError(0x2a, "")
+				err := NewLocalCryptoError(0x2a, nil)
 				Expect(err.Error()).To(Equal("CRYPTO_ERROR 0x12a (local): tls: bad certificate"))
 			})
 		})

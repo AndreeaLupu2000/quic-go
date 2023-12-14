@@ -1,158 +1,152 @@
 package quic
 
 import (
-	"github.com/lucas-clemente/quic-go/handover"
-	"github.com/lucas-clemente/quic-go/internal/ackhandler"
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/wire"
-	"github.com/lucas-clemente/quic-go/internal/xse"
+	"github.com/quic-go/quic-go/internal/ackhandler"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/wire"
+	"github.com/quic-go/quic-go/internal/xads"
 )
 
-// this compatibility wrapper is required to use a xse.Stream as a quic.streamI
-type xseStreamI struct {
-	xse.Stream
+// this compatibility wrapper is required to use a xads.Stream as a quic.streamI
+type xadsStreamI struct {
+	xads.Stream
 }
 
-func (x xseStreamI) storeSendState(state handover.SendStreamState, perspective protocol.Perspective, config *ConnectionStateStoreConf) {
-	//TODO implement me
-	panic("implement me")
-}
+var _ streamI = &xadsStreamI{}
 
-func (x xseStreamI) restoreSendState(state handover.SendStreamState, perspective protocol.Perspective) {
-	//TODO implement me
-	panic("implement me")
-}
-
-var _ streamI = &xseStreamI{}
-
-func (x xseStreamI) closeForShutdown(err error) {
+func (x xadsStreamI) closeForShutdown(err error) {
 	x.Stream.CloseForShutdown(err)
 }
 
-func (x xseStreamI) handleStreamFrame(frame *wire.StreamFrame) error {
+func (x xadsStreamI) handleStreamFrame(frame *wire.StreamFrame) error {
 	return x.Stream.HandleStreamFrame(frame)
 }
 
-func (x xseStreamI) handleResetStreamFrame(frame *wire.ResetStreamFrame) error {
+func (x xadsStreamI) handleResetStreamFrame(frame *wire.ResetStreamFrame) error {
 	return x.Stream.HandleResetStreamFrame(frame)
 }
 
-func (x xseStreamI) getWindowUpdate() protocol.ByteCount {
+func (x xadsStreamI) getWindowUpdate() protocol.ByteCount {
 	return x.Stream.GetWindowUpdate()
 }
 
-func (x xseStreamI) hasData() bool {
+func (x xadsStreamI) hasData() bool {
 	return x.Stream.HasData()
 }
 
-func (x xseStreamI) handleStopSendingFrame(frame *wire.StopSendingFrame) {
+func (x xadsStreamI) handleStopSendingFrame(frame *wire.StopSendingFrame) {
 	x.Stream.HandleStopSendingFrame(frame)
 }
 
-func (x xseStreamI) popStreamFrame(maxBytes protocol.ByteCount) (*ackhandler.Frame, bool) {
-	return x.Stream.PopStreamFrame(maxBytes)
+func (x xadsStreamI) popStreamFrame(maxBytes protocol.ByteCount, v protocol.VersionNumber) (ackhandler.StreamFrame, bool, bool) {
+	return x.Stream.PopStreamFrame(maxBytes, v)
 }
 
-func (x xseStreamI) updateSendWindow(count protocol.ByteCount) {
+func (x xadsStreamI) updateSendWindow(count protocol.ByteCount) {
 	x.Stream.UpdateSendWindow(count)
 }
 
-func (x xseStreamI) ReadOffset() ByteCount {
-	//TODO implement me
-	panic("implement me")
+// this compatibility wrapper is required to use a xads.SendStream as a quic.sendStreamI
+type xadsSendStreamI struct {
+	xads.SendStream
 }
 
-func (x xseStreamI) WriteOffset() ByteCount {
-	//TODO implement me
-	panic("implement me")
-}
+var _ sendStreamI = &xadsSendStreamI{}
 
-func (x xseStreamI) storeReceiveState(state handover.ReceiveStreamState, perspective protocol.Perspective, config *ConnectionStateStoreConf) {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (x xseStreamI) restoreReceiveState(state handover.ReceiveStreamState, perspective protocol.Perspective) {
-	//TODO implement me
-	panic("implement me")
-}
-
-// this compatibility wrapper is required to use a xse.SendStream as a quic.sendStreamI
-type xseSendStreamI struct {
-	xse.SendStream
-}
-
-func (x xseSendStreamI) storeSendState(state handover.SendStreamState, perspective protocol.Perspective, config *ConnectionStateStoreConf) {
-	//TODO implement me
-	panic("implement me")
-}
-
-var _ sendStreamI = &xseSendStreamI{}
-
-func (x xseSendStreamI) handleStopSendingFrame(frame *wire.StopSendingFrame) {
+func (x xadsSendStreamI) handleStopSendingFrame(frame *wire.StopSendingFrame) {
 	x.SendStream.HandleStopSendingFrame(frame)
 }
 
-func (x xseSendStreamI) hasData() bool {
+func (x xadsSendStreamI) hasData() bool {
 	return x.SendStream.HasData()
 }
 
-func (x xseSendStreamI) popStreamFrame(maxBytes protocol.ByteCount) (*ackhandler.Frame, bool) {
-	return x.SendStream.PopStreamFrame(maxBytes)
+func (x xadsSendStreamI) popStreamFrame(maxBytes protocol.ByteCount, v protocol.VersionNumber) (ackhandler.StreamFrame, bool, bool) {
+	return x.SendStream.PopStreamFrame(maxBytes, v)
 }
 
-func (x xseSendStreamI) closeForShutdown(err error) {
+func (x xadsSendStreamI) closeForShutdown(err error) {
 	x.SendStream.CloseForShutdown(err)
 }
 
-func (x xseSendStreamI) updateSendWindow(count protocol.ByteCount) {
+func (x xadsSendStreamI) updateSendWindow(count protocol.ByteCount) {
 	x.SendStream.UpdateSendWindow(count)
 }
 
-func (x xseSendStreamI) WriteOffset() ByteCount {
-	//TODO implement me
-	panic("implement me")
+// this compatibility wrapper is required to use a xads.ReceiveStream as a quic.xadsReceiveStreamI
+type xadsReceiveStreamI struct {
+	xads.ReceiveStream
 }
 
-func (x xseSendStreamI) restoreSendState(state handover.SendStreamState, perspective protocol.Perspective) {
-	//TODO implement me
-	panic("implement me")
-}
+var _ receiveStreamI = &xadsReceiveStreamI{}
 
-// this compatibility wrapper is required to use a xse.ReceiveStream as a quic.xseReceiveStreamI
-type xseReceiveStreamI struct {
-	xse.ReceiveStream
-}
-
-var _ receiveStreamI = &xseReceiveStreamI{}
-
-func (x xseReceiveStreamI) handleStreamFrame(frame *wire.StreamFrame) error {
+func (x xadsReceiveStreamI) handleStreamFrame(frame *wire.StreamFrame) error {
 	return x.ReceiveStream.HandleStreamFrame(frame)
 }
 
-func (x xseReceiveStreamI) handleResetStreamFrame(frame *wire.ResetStreamFrame) error {
+func (x xadsReceiveStreamI) handleResetStreamFrame(frame *wire.ResetStreamFrame) error {
 	return x.ReceiveStream.HandleResetStreamFrame(frame)
 }
 
-func (x xseReceiveStreamI) closeForShutdown(err error) {
+func (x xadsReceiveStreamI) closeForShutdown(err error) {
 	x.ReceiveStream.CloseForShutdown(err)
 }
 
-func (x xseReceiveStreamI) getWindowUpdate() protocol.ByteCount {
+func (x xadsReceiveStreamI) getWindowUpdate() protocol.ByteCount {
 	return x.ReceiveStream.GetWindowUpdate()
 }
 
-func (x xseReceiveStreamI) storeReceiveState(state handover.ReceiveStreamState, perspective protocol.Perspective, config *ConnectionStateStoreConf) {
-	//TODO implement me
-	panic("implement me")
+var _ xads.SendStream = &sendStream{}
+
+func (s *sendStream) HasData() bool {
+	return s.hasData()
 }
 
-func (x xseReceiveStreamI) restoreReceiveState(state handover.ReceiveStreamState, perspective protocol.Perspective) {
-	//TODO implement me
-	panic("implement me")
+func (s *sendStream) HandleStopSendingFrame(frame *wire.StopSendingFrame) {
+	s.handleStopSendingFrame(frame)
 }
 
-func (x xseReceiveStreamI) ReadOffset() ByteCount {
-	//TODO implement me
-	panic("implement me")
+func (s *sendStream) PopStreamFrame(maxBytes protocol.ByteCount, v protocol.VersionNumber) (ackhandler.StreamFrame, bool, bool) {
+	return s.popStreamFrame(maxBytes, v)
+}
+
+func (s *sendStream) CloseForShutdown(err error) {
+	s.closeForShutdown(err)
+}
+
+func (s *sendStream) UpdateSendWindow(count protocol.ByteCount) {
+	s.updateSendWindow(count)
+}
+
+var _ xads.ReceiveStream = &receiveStream{}
+
+func (s *receiveStream) HandleStreamFrame(frame *wire.StreamFrame) error {
+	return s.handleStreamFrame(frame)
+}
+
+func (s *receiveStream) HandleResetStreamFrame(frame *wire.ResetStreamFrame) error {
+	return s.handleResetStreamFrame(frame)
+}
+
+func (s *receiveStream) CloseForShutdown(err error) {
+	s.closeForShutdown(err)
+}
+
+func (s *receiveStream) GetWindowUpdate() protocol.ByteCount {
+	return s.getWindowUpdate()
+}
+
+var _ streamI = &stream{}
+var _ xads.Stream = &stream{}
+
+func (s *stream) ReceiveStream() xads.ReceiveStream {
+	return &s.receiveStream
+}
+
+func (s *stream) SendStream() xads.SendStream {
+	return &s.sendStream
+}
+
+func (s *stream) CloseForShutdown(err error) {
+	s.closeForShutdown(err)
 }

@@ -4,15 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/lucas-clemente/quic-go/handover"
-	"github.com/lucas-clemente/quic-go/internal/xse"
+	"github.com/quic-go/quic-go/internal/xads"
 	"net"
 	"sync"
 
-	"github.com/lucas-clemente/quic-go/internal/flowcontrol"
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/qerr"
-	"github.com/lucas-clemente/quic-go/internal/wire"
+	"github.com/quic-go/quic-go/internal/flowcontrol"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/qerr"
+	"github.com/quic-go/quic-go/internal/wire"
 )
 
 type streamError struct {
@@ -48,7 +47,6 @@ var errTooManyOpenStreams = errors.New("too many open streams")
 
 type streamsMap struct {
 	perspective protocol.Perspective
-	version     protocol.VersionNumber
 
 	maxIncomingBidiStreams uint64
 	maxIncomingUniStreams  uint64
@@ -62,9 +60,8 @@ type streamsMap struct {
 	incomingBidiStreams *incomingStreamsMap[streamI]
 	incomingUniStreams  *incomingStreamsMap[receiveStreamI]
 	reset               bool
-	// if nil, XSE-QUIC extension is not used
-	xseCryptoSetup       xse.CryptoSetup
-	streamFramesInFlight func(streamID StreamID, encLevel protocol.EncryptionLevel) []*wire.StreamFrame
+	// if nil, XADS-QUIC extension is not used
+	xadsCryptoSetup xads.CryptoSetup
 }
 
 var _ streamManager = &streamsMap{}
@@ -75,9 +72,6 @@ func newStreamsMap(
 	maxIncomingBidiStreams uint64,
 	maxIncomingUniStreams uint64,
 	perspective protocol.Perspective,
-	version protocol.VersionNumber,
-	// required for stream state serialization
-	streamFramesInFlight func(streamID StreamID, encLevel protocol.EncryptionLevel) []*wire.StreamFrame,
 ) streamManager {
 	m := &streamsMap{
 		perspective:            perspective,
@@ -85,8 +79,6 @@ func newStreamsMap(
 		maxIncomingBidiStreams: maxIncomingBidiStreams,
 		maxIncomingUniStreams:  maxIncomingUniStreams,
 		sender:                 sender,
-		version:                version,
-		streamFramesInFlight:   streamFramesInFlight,
 	}
 	m.initMaps()
 	return m
@@ -97,20 +89,11 @@ func (m *streamsMap) initMaps() {
 		protocol.StreamTypeBidi,
 		func(num protocol.StreamNum) streamI {
 			id := num.StreamID(protocol.StreamTypeBidi, m.perspective)
-			stream := newStream(
-				id,
-				m.sender,
-				m.newFlowController(id),
-				m.version,
-				func(encLevel protocol.EncryptionLevel) []*wire.StreamFrame {
-					return m.streamFramesInFlight(id, encLevel)
-				},
-			)
-			if m.xseCryptoSetup != nil {
-				return xseStreamI{m.xseCryptoSetup.NewStream(stream)}
-			} else {
-				return stream
+			stream := newStream(id, m.sender, m.newFlowController(id))
+			if m.xadsCryptoSetup != nil {
+				return xadsStreamI{m.xadsCryptoSetup.NewStream(stream)}
 			}
+			return stream
 		},
 		m.sender.queueControlFrame,
 	)
@@ -118,20 +101,11 @@ func (m *streamsMap) initMaps() {
 		protocol.StreamTypeBidi,
 		func(num protocol.StreamNum) streamI {
 			id := num.StreamID(protocol.StreamTypeBidi, m.perspective.Opposite())
-			stream := newStream(
-				id,
-				m.sender,
-				m.newFlowController(id),
-				m.version,
-				func(encLevel protocol.EncryptionLevel) []*wire.StreamFrame {
-					return m.streamFramesInFlight(id, encLevel)
-				},
-			)
-			if m.xseCryptoSetup != nil {
-				return xseStreamI{m.xseCryptoSetup.NewStream(stream)}
-			} else {
-				return stream
+			stream := newStream(id, m.sender, m.newFlowController(id))
+			if m.xadsCryptoSetup != nil {
+				return xadsStreamI{m.xadsCryptoSetup.NewStream(stream)}
 			}
+			return stream
 		},
 		m.maxIncomingBidiStreams,
 		m.sender.queueControlFrame,
@@ -140,20 +114,11 @@ func (m *streamsMap) initMaps() {
 		protocol.StreamTypeUni,
 		func(num protocol.StreamNum) sendStreamI {
 			id := num.StreamID(protocol.StreamTypeUni, m.perspective)
-			stream := newSendStream(
-				id,
-				m.sender,
-				m.newFlowController(id),
-				m.version,
-				func(encLevel protocol.EncryptionLevel) []*wire.StreamFrame {
-					return m.streamFramesInFlight(id, encLevel)
-				},
-			)
-			if m.xseCryptoSetup != nil {
-				return xseSendStreamI{m.xseCryptoSetup.NewSendStream(stream)}
-			} else {
-				return stream
+			stream := newSendStream(id, m.sender, m.newFlowController(id))
+			if m.xadsCryptoSetup != nil {
+				return xadsSendStreamI{m.xadsCryptoSetup.NewSendStream(stream)}
 			}
+			return stream
 		},
 		m.sender.queueControlFrame,
 	)
@@ -161,11 +126,11 @@ func (m *streamsMap) initMaps() {
 		protocol.StreamTypeUni,
 		func(num protocol.StreamNum) receiveStreamI {
 			id := num.StreamID(protocol.StreamTypeUni, m.perspective.Opposite())
-			if m.xseCryptoSetup != nil {
-				return xseReceiveStreamI{m.xseCryptoSetup.NewReceiveStream(newReceiveStream(id, m.sender, m.newFlowController(id), m.version))}
-			} else {
-				return newReceiveStream(id, m.sender, m.newFlowController(id), m.version)
+			stream := newReceiveStream(id, m.sender, m.newFlowController(id))
+			if m.xadsCryptoSetup != nil {
+				return xadsReceiveStreamI{m.xadsCryptoSetup.NewReceiveStream(stream)}
 			}
+			return stream
 		},
 		m.maxIncomingUniStreams,
 		m.sender.queueControlFrame,
@@ -371,77 +336,6 @@ func (m *streamsMap) UseResetMaps() {
 	m.mutex.Unlock()
 }
 
-func (m *streamsMap) SetXseCryptoSetup(xseCryptoSetup xse.CryptoSetup) {
-	m.xseCryptoSetup = xseCryptoSetup
-}
-
-func (m *streamsMap) RestoreBidiStream(state *handover.BidiStreamState) (Stream, error) {
-	var stream Stream
-	var err error
-	if state.ID.InitiatedBy() == m.perspective {
-		stream, err = RestoreBidiStream(m.outgoingBidiStreams, state.ID.StreamNum(), state, m.perspective)
-	} else {
-		stream, err = RestoreIncomingBidiStream(m.incomingBidiStreams, state.ID.StreamNum(), state, m.perspective)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return stream, nil
-}
-
-func (m *streamsMap) RestoreSendStream(state *handover.UniStreamState) (SendStream, error) {
-	return RestoreOutgoingUniStream(m.outgoingUniStreams, state.ID.StreamNum(), state, m.perspective)
-}
-
-func (m *streamsMap) RestoreReceiveStream(state *handover.UniStreamState) (ReceiveStream, error) {
-	return RestoreIncomingUniStream(m.incomingUniStreams, state.ID.StreamNum(), state, m.perspective)
-}
-
-func streamIToBidiStreamState(s streamI, perspective Perspective, config *ConnectionStateStoreConf) handover.BidiStreamState {
-	ss := handover.BidiStreamState{
-		ID: s.StreamID(),
-	}
-	s.storeReceiveState(&ss, perspective, config)
-	s.storeSendState(&ss, perspective, config)
-	return ss
-}
-
-func (m *streamsMap) BidiStreamStates(config *ConnectionStateStoreConf) map[StreamID]handover.BidiStreamState {
-	states := make(map[protocol.StreamID]handover.BidiStreamState)
-	for _, stream := range m.outgoingBidiStreams.streams {
-		states[stream.StreamID()] = streamIToBidiStreamState(stream, m.perspective, config)
-	}
-	for _, entry := range m.incomingBidiStreams.streams {
-		stream := entry.stream
-		states[stream.StreamID()] = streamIToBidiStreamState(stream, m.perspective, config)
-	}
-	return states
-}
-
-func (m *streamsMap) OpenedBidiStream(id StreamID) (Stream, error) {
-	if id.InitiatedBy() == m.perspective {
-		return m.outgoingBidiStreams.GetStream(id.StreamNum())
-	} else {
-		return m.incomingBidiStreams.GetStream(id.StreamNum())
-	}
-}
-
-func (m *streamsMap) UniStreamStates(config *ConnectionStateStoreConf) map[protocol.StreamID]handover.UniStreamState {
-	ss := make(map[protocol.StreamID]handover.UniStreamState)
-	for _, stream := range m.outgoingUniStreams.streams {
-		s := handover.UniStreamState{
-			ID: stream.StreamID(),
-		}
-		stream.storeSendState(&s, m.perspective, config)
-		ss[s.ID] = s
-	}
-	for _, entry := range m.incomingUniStreams.streams {
-		stream := entry.stream
-		s := handover.UniStreamState{
-			ID: stream.StreamID(),
-		}
-		stream.storeReceiveState(&s, m.perspective, config)
-		ss[s.ID] = s
-	}
-	return ss
+func (m *streamsMap) SetXADSCryptoSetup(xadsCryptoSetup xads.CryptoSetup) {
+	m.xadsCryptoSetup = xadsCryptoSetup
 }

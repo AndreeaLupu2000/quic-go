@@ -70,16 +70,3 @@ func MaxTime(a, b time.Time) time.Time {
 	}
 	return b
 }
-
-// MaxUint64V is a variadic version of MaxUint64
-// returns the maximum
-// returns 0 if no arguments
-func MaxUint64V(nums ...uint64) uint64 {
-	var max uint64 = 0
-	for _, num := range nums {
-		if num > max {
-			max = num
-		}
-	}
-	return max
-}

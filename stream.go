@@ -1,17 +1,15 @@
 package quic
 
 import (
-	"github.com/lucas-clemente/quic-go/handover"
-	"github.com/lucas-clemente/quic-go/internal/xse"
 	"net"
 	"os"
 	"sync"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/internal/ackhandler"
-	"github.com/lucas-clemente/quic-go/internal/flowcontrol"
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/wire"
+	"github.com/quic-go/quic-go/internal/ackhandler"
+	"github.com/quic-go/quic-go/internal/flowcontrol"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/wire"
 )
 
 type deadlineError struct{}
@@ -59,16 +57,11 @@ type streamI interface {
 	handleStreamFrame(*wire.StreamFrame) error
 	handleResetStreamFrame(*wire.ResetStreamFrame) error
 	getWindowUpdate() protocol.ByteCount
-	storeReceiveState(state handover.ReceiveStreamState, perspective protocol.Perspective, config *ConnectionStateStoreConf)
-	restoreReceiveState(state handover.ReceiveStreamState, perspective protocol.Perspective)
-
 	// for sending
 	hasData() bool
 	handleStopSendingFrame(*wire.StopSendingFrame)
-	popStreamFrame(maxBytes protocol.ByteCount) (*ackhandler.Frame, bool)
+	popStreamFrame(maxBytes protocol.ByteCount, v protocol.VersionNumber) (ackhandler.StreamFrame, bool, bool)
 	updateSendWindow(protocol.ByteCount)
-	storeSendState(state handover.SendStreamState, perspective protocol.Perspective, config *ConnectionStateStoreConf)
-	restoreSendState(state handover.SendStreamState, perspective protocol.Perspective)
 }
 
 var (
@@ -87,23 +80,16 @@ type stream struct {
 	sender                 streamSender
 	receiveStreamCompleted bool
 	sendStreamCompleted    bool
-
-	version protocol.VersionNumber
 }
 
 var _ Stream = &stream{}
-var _ streamI = &stream{}
-var _ xse.Stream = &stream{}
 
 // newStream creates a new Stream
 func newStream(streamID protocol.StreamID,
 	sender streamSender,
 	flowController flowcontrol.StreamFlowController,
-	version protocol.VersionNumber,
-	// required for stream state serialization
-	streamFramesInFlight func(level protocol.EncryptionLevel) []*wire.StreamFrame,
 ) *stream {
-	s := &stream{sender: sender, version: version}
+	s := &stream{sender: sender}
 	senderForSendStream := &uniStreamSender{
 		streamSender: sender,
 		onStreamCompletedImpl: func() {
@@ -113,7 +99,7 @@ func newStream(streamID protocol.StreamID,
 			s.completedMutex.Unlock()
 		},
 	}
-	s.sendStream = *newSendStream(streamID, senderForSendStream, flowController, version, streamFramesInFlight)
+	s.sendStream = *newSendStream(streamID, senderForSendStream, flowController)
 	senderForReceiveStream := &uniStreamSender{
 		streamSender: sender,
 		onStreamCompletedImpl: func() {
@@ -123,7 +109,7 @@ func newStream(streamID protocol.StreamID,
 			s.completedMutex.Unlock()
 		},
 	}
-	s.receiveStream = *newReceiveStream(streamID, senderForReceiveStream, flowController, version)
+	s.receiveStream = *newReceiveStream(streamID, senderForReceiveStream, flowController)
 	return s
 }
 
@@ -157,16 +143,4 @@ func (s *stream) checkIfCompleted() {
 	if s.sendStreamCompleted && s.receiveStreamCompleted {
 		s.sender.onStreamCompleted(s.StreamID())
 	}
-}
-
-func (s *stream) ReceiveStream() xse.ReceiveStream {
-	return &s.receiveStream
-}
-
-func (s *stream) SendStream() xse.SendStream {
-	return &s.sendStream
-}
-
-func (s *stream) CloseForShutdown(err error) {
-	s.closeForShutdown(err)
 }

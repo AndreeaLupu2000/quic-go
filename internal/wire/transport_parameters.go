@@ -2,26 +2,28 @@ package wire
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"sort"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/qerr"
-	"github.com/lucas-clemente/quic-go/internal/utils"
-	"github.com/lucas-clemente/quic-go/quicvarint"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/qerr"
+	"github.com/quic-go/quic-go/internal/utils"
+	"github.com/quic-go/quic-go/quicvarint"
 )
 
-const transportParameterMarshalingVersion = 1
+// AdditionalTransportParametersClient are additional transport parameters that will be added
+// to the client's transport parameters.
+// This is not intended for production use, but _only_ to increase the size of the ClientHello beyond
+// the usual size of less than 1 MTU.
+var AdditionalTransportParametersClient map[uint64][]byte
 
-func init() {
-	rand.Seed(time.Now().UTC().UnixNano())
-}
+const transportParameterMarshalingVersion = 1
 
 type transportParameterID uint64
 
@@ -89,8 +91,8 @@ type TransportParameters struct {
 
 	MaxDatagramFrameSize protocol.ByteCount
 
-	// Use XSE-QUIC extension
-	ExtraStreamEncryption bool
+	// Use XADS-QUIC extension
+	ExtraApplicationDataSecurity bool
 }
 
 // Unmarshal the transport parameters
@@ -111,6 +113,7 @@ func (p *TransportParameters) unmarshal(r *bytes.Reader, sentBy protocol.Perspec
 	var (
 		readOriginalDestinationConnectionID bool
 		readInitialSourceConnectionID       bool
+		readActiveConnectionIDLimit         bool
 	)
 
 	p.AckDelayExponent = protocol.DefaultAckDelayExponent
@@ -132,6 +135,9 @@ func (p *TransportParameters) unmarshal(r *bytes.Reader, sentBy protocol.Perspec
 		}
 		parameterIDs = append(parameterIDs, paramID)
 		switch paramID {
+		case activeConnectionIDLimitParameterID:
+			readActiveConnectionIDLimit = true
+			fallthrough
 		case maxIdleTimeoutParameterID,
 			maxUDPPayloadSizeParameterID,
 			initialMaxDataParameterID,
@@ -141,7 +147,6 @@ func (p *TransportParameters) unmarshal(r *bytes.Reader, sentBy protocol.Perspec
 			initialMaxStreamsBidiParameterID,
 			initialMaxStreamsUniParameterID,
 			maxAckDelayParameterID,
-			activeConnectionIDLimitParameterID,
 			maxDatagramFrameSizeParameterID,
 			ackDelayExponentParameterID:
 			if err := p.readNumericTransportParameter(r, paramID, int(paramLen)); err != nil {
@@ -188,12 +193,15 @@ func (p *TransportParameters) unmarshal(r *bytes.Reader, sentBy protocol.Perspec
 			if paramLen != 0 {
 				return fmt.Errorf("wrong length for extra_stream_encryption: %d (expected empty)", paramLen)
 			}
-			p.ExtraStreamEncryption = true
+			p.ExtraApplicationDataSecurity = true
 		default:
 			r.Seek(int64(paramLen), io.SeekCurrent)
 		}
 	}
 
+	if !readActiveConnectionIDLimit {
+		p.ActiveConnectionIDLimit = protocol.DefaultActiveConnectionIDLimit
+	}
 	if !fromSessionTicket {
 		if sentBy == protocol.PerspectiveServer && !readOriginalDestinationConnectionID {
 			return errors.New("missing original_destination_connection_id")
@@ -313,6 +321,9 @@ func (p *TransportParameters) readNumericTransportParameter(
 		}
 		p.MaxAckDelay = time.Duration(val) * time.Millisecond
 	case activeConnectionIDLimitParameterID:
+		if val < 2 {
+			return fmt.Errorf("invalid value for active_connection_id_limit: %d (minimum 2)", val)
+		}
 		p.ActiveConnectionIDLimit = val
 	case maxDatagramFrameSizeParameterID:
 		p.MaxDatagramFrameSize = protocol.ByteCount(val)
@@ -322,20 +333,20 @@ func (p *TransportParameters) readNumericTransportParameter(
 	return nil
 }
 
-func (p *TransportParameters) marshal(pers protocol.Perspective, addGreasedValue bool, includeExtraStreamEncryption bool) []byte {
+// Marshal the transport parameters
+func (p *TransportParameters) Marshal(pers protocol.Perspective) []byte {
 	// Typical Transport Parameters consume around 110 bytes, depending on the exact values,
 	// especially the lengths of the Connection IDs.
 	// Allocate 256 bytes, so we won't have to grow the slice in any case.
 	b := make([]byte, 0, 256)
 
-	if addGreasedValue {
-		// add a greased value
-		b = quicvarint.Append(b, uint64(27+31*rand.Intn(100)))
-		length := rand.Intn(16)
-		b = quicvarint.Append(b, uint64(length))
-		b = b[:len(b)+length]
-		rand.Read(b[len(b)-length:])
-	}
+	// add a greased value
+	random := make([]byte, 18)
+	rand.Read(random)
+	b = quicvarint.Append(b, 27+31*uint64(random[0]))
+	length := random[1] % 16
+	b = quicvarint.Append(b, uint64(length))
+	b = append(b, random[2:2+length]...)
 
 	// initial_max_stream_data_bidi_local
 	b = p.marshalVarintParam(b, initialMaxStreamDataBidiLocalParameterID, uint64(p.InitialMaxStreamDataBidiLocal))
@@ -396,7 +407,9 @@ func (p *TransportParameters) marshal(pers protocol.Perspective, addGreasedValue
 		}
 	}
 	// active_connection_id_limit
-	b = p.marshalVarintParam(b, activeConnectionIDLimitParameterID, p.ActiveConnectionIDLimit)
+	if p.ActiveConnectionIDLimit != protocol.DefaultActiveConnectionIDLimit {
+		b = p.marshalVarintParam(b, activeConnectionIDLimitParameterID, p.ActiveConnectionIDLimit)
+	}
 	// initial_source_connection_id
 	b = quicvarint.Append(b, uint64(initialSourceConnectionIDParameterID))
 	b = quicvarint.Append(b, uint64(p.InitialSourceConnectionID.Len()))
@@ -410,17 +423,21 @@ func (p *TransportParameters) marshal(pers protocol.Perspective, addGreasedValue
 	if p.MaxDatagramFrameSize != protocol.InvalidByteCount {
 		b = p.marshalVarintParam(b, maxDatagramFrameSizeParameterID, uint64(p.MaxDatagramFrameSize))
 	}
+
+	if pers == protocol.PerspectiveClient && len(AdditionalTransportParametersClient) > 0 {
+		for k, v := range AdditionalTransportParametersClient {
+			b = quicvarint.Append(b, k)
+			b = quicvarint.Append(b, uint64(len(v)))
+			b = append(b, v...)
+		}
+	}
 	// extra_stream_encryption
-	if includeExtraStreamEncryption && p.ExtraStreamEncryption {
+	// TODO do not give this to a middlebox
+	if p.ExtraApplicationDataSecurity {
 		b = quicvarint.Append(b, uint64(extraStreamEncryptionParameterID))
 		b = quicvarint.Append(b, 0) // length
 	}
 	return b
-}
-
-// Marshal the transport parameters
-func (p *TransportParameters) Marshal(pers protocol.Perspective) []byte {
-	return p.marshal(pers, true, true)
 }
 
 func (p *TransportParameters) marshalVarintParam(b []byte, id transportParameterID, val uint64) []byte {
@@ -452,13 +469,12 @@ func (p *TransportParameters) MarshalForSessionTicket(b []byte) []byte {
 	b = p.marshalVarintParam(b, initialMaxStreamsBidiParameterID, uint64(p.MaxBidiStreamNum))
 	// initial_max_uni_streams
 	b = p.marshalVarintParam(b, initialMaxStreamsUniParameterID, uint64(p.MaxUniStreamNum))
+	// max_datagram_frame_size
+	if p.MaxDatagramFrameSize != protocol.InvalidByteCount {
+		b = p.marshalVarintParam(b, maxDatagramFrameSizeParameterID, uint64(p.MaxDatagramFrameSize))
+	}
 	// active_connection_id_limit
 	b = p.marshalVarintParam(b, activeConnectionIDLimitParameterID, p.ActiveConnectionIDLimit)
-	// extra_stream_encryption
-	if p.ExtraStreamEncryption {
-		b = quicvarint.Append(b, uint64(extraStreamEncryptionParameterID))
-		b = quicvarint.Append(b, 0)
-	}
 	return b
 }
 
@@ -476,6 +492,9 @@ func (p *TransportParameters) UnmarshalFromSessionTicket(r *bytes.Reader) error 
 
 // ValidFor0RTT checks if the transport parameters match those saved in the session ticket.
 func (p *TransportParameters) ValidFor0RTT(saved *TransportParameters) bool {
+	if saved.MaxDatagramFrameSize != protocol.InvalidByteCount && (p.MaxDatagramFrameSize == protocol.InvalidByteCount || p.MaxDatagramFrameSize < saved.MaxDatagramFrameSize) {
+		return false
+	}
 	return p.InitialMaxStreamDataBidiLocal >= saved.InitialMaxStreamDataBidiLocal &&
 		p.InitialMaxStreamDataBidiRemote >= saved.InitialMaxStreamDataBidiRemote &&
 		p.InitialMaxStreamDataUni >= saved.InitialMaxStreamDataUni &&
@@ -483,6 +502,21 @@ func (p *TransportParameters) ValidFor0RTT(saved *TransportParameters) bool {
 		p.MaxBidiStreamNum >= saved.MaxBidiStreamNum &&
 		p.MaxUniStreamNum >= saved.MaxUniStreamNum &&
 		p.ActiveConnectionIDLimit == saved.ActiveConnectionIDLimit
+}
+
+// ValidForUpdate checks that the new transport parameters don't reduce limits after resuming a 0-RTT connection.
+// It is only used on the client side.
+func (p *TransportParameters) ValidForUpdate(saved *TransportParameters) bool {
+	if saved.MaxDatagramFrameSize != protocol.InvalidByteCount && (p.MaxDatagramFrameSize == protocol.InvalidByteCount || p.MaxDatagramFrameSize < saved.MaxDatagramFrameSize) {
+		return false
+	}
+	return p.ActiveConnectionIDLimit >= saved.ActiveConnectionIDLimit &&
+		p.InitialMaxData >= saved.InitialMaxData &&
+		p.InitialMaxStreamDataBidiLocal >= saved.InitialMaxStreamDataBidiLocal &&
+		p.InitialMaxStreamDataBidiRemote >= saved.InitialMaxStreamDataBidiRemote &&
+		p.InitialMaxStreamDataUni >= saved.InitialMaxStreamDataUni &&
+		p.MaxBidiStreamNum >= saved.MaxBidiStreamNum &&
+		p.MaxUniStreamNum >= saved.MaxUniStreamNum
 }
 
 // String returns a string representation, intended for logging.
@@ -505,8 +539,4 @@ func (p *TransportParameters) String() string {
 	}
 	logString += "}"
 	return fmt.Sprintf(logString, logParams...)
-}
-
-func (p *TransportParameters) MarshalForHandover(pers protocol.Perspective) []byte {
-	return p.marshal(pers, false, false)
 }

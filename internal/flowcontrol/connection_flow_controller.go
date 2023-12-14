@@ -3,12 +3,11 @@ package flowcontrol
 import (
 	"errors"
 	"fmt"
-	"github.com/lucas-clemente/quic-go/handover"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/qerr"
-	"github.com/lucas-clemente/quic-go/internal/utils"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/qerr"
+	"github.com/quic-go/quic-go/internal/utils"
 )
 
 type connectionFlowController struct {
@@ -110,21 +109,4 @@ func (c *connectionFlowController) Reset() error {
 	c.bytesSent = 0
 	c.lastBlockedAt = 0
 	return nil
-}
-
-func (c *connectionFlowController) StoreState(state *handover.State, perspective protocol.Perspective) {
-	state.SetIncomingMaxData(perspective, c.receiveWindow)
-	state.SetOutgoingMaxData(perspective, c.sendWindow)
-	//TODO store bytes received
-	state.SetBytesSent(perspective, c.bytesSent)
-}
-
-// TODO restore bytesRead and bytesSent
-func (c *connectionFlowController) RestoreState(state *handover.State, perspective protocol.Perspective) {
-	c.receiveWindow = state.IncomingMaxData(perspective)
-	c.bytesRead = c.receiveWindow
-	c.sendWindow = state.OutgoingMaxData(perspective)
-	//TODO restore bytes received
-	c.bytesSent = state.BytesSent(perspective)
-	c.queueWindowUpdate()
 }

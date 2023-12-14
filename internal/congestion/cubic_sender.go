@@ -4,17 +4,19 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/utils"
-	"github.com/lucas-clemente/quic-go/logging"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/utils"
+	"github.com/quic-go/quic-go/logging"
 )
 
 const (
 	// maxDatagramSize is the default maximum packet size used in the Linux TCP implementation.
 	// Used in QUIC for congestion window computations in bytes.
-	initialMaxDatagramSize = protocol.ByteCount(protocol.InitialPacketSizeIPv4)
-	maxBurstPackets        = 3
-	renoBeta               = 0.7 // Reno backoff factor.
+	initialMaxDatagramSize     = protocol.ByteCount(protocol.InitialPacketSizeIPv4)
+	maxBurstPackets            = 3
+	renoBeta                   = 0.7 // Reno backoff factor.
+	minCongestionWindowPackets = 2
+	initialCongestionWindow    = 32
 )
 
 type cubicSender struct {
@@ -42,20 +44,8 @@ type cubicSender struct {
 	// Congestion window in bytes.
 	congestionWindow protocol.ByteCount
 
-	// in number of packets.
-	minCongestionWindowPackets uint32
-
-	// in number of packets.
-	maxCongestionWindowPackets uint32
-
 	// Slow start congestion window in bytes, aka ssthresh.
 	slowStartThreshold protocol.ByteCount
-
-	// Required for reset on connection migration
-	initialSlowStartThreshold protocol.ByteCount
-
-	minSlowStartThreshold protocol.ByteCount
-	maxSlowStartThreshold protocol.ByteCount
 
 	// ACK counter for the Reno implementation.
 	numAckedPackets uint64
@@ -79,12 +69,6 @@ func NewCubicSender(
 	clock Clock,
 	rttStats *utils.RTTStats,
 	initialMaxDatagramSize protocol.ByteCount,
-	initialCongestionWindow uint32, // number of packets
-	minCongestionWindow uint32, // number of packets
-	maxCongestionWindow uint32, // number of packets
-	initialSlowStartThreshold protocol.ByteCount,
-	minSlowStartThreshold protocol.ByteCount,
-	maxSlowStartThreshold protocol.ByteCount,
 	reno bool,
 	tracer logging.ConnectionTracer,
 ) *cubicSender {
@@ -93,12 +77,7 @@ func NewCubicSender(
 		rttStats,
 		reno,
 		initialMaxDatagramSize,
-		protocol.ByteCount(initialCongestionWindow)*initialMaxDatagramSize,
-		minCongestionWindow,
-		maxCongestionWindow,
-		initialSlowStartThreshold,
-		minSlowStartThreshold,
-		maxSlowStartThreshold,
+		initialCongestionWindow*initialMaxDatagramSize,
 		protocol.MaxCongestionWindowPackets*initialMaxDatagramSize,
 		tracer,
 	)
@@ -109,12 +88,7 @@ func newCubicSender(
 	rttStats *utils.RTTStats,
 	reno bool,
 	initialMaxDatagramSize,
-	initialCongestionWindow protocol.ByteCount,
-	minCongestionWindowPackets,
-	maxCongestionWindowPackets uint32,
-	initialSlowStartThreshold protocol.ByteCount,
-	minSlowStartThreshold protocol.ByteCount,
-	maxSlowStartThreshold protocol.ByteCount,
+	initialCongestionWindow,
 	initialMaxCongestionWindow protocol.ByteCount,
 	tracer logging.ConnectionTracer,
 ) *cubicSender {
@@ -126,12 +100,7 @@ func newCubicSender(
 		initialCongestionWindow:    initialCongestionWindow,
 		initialMaxCongestionWindow: initialMaxCongestionWindow,
 		congestionWindow:           initialCongestionWindow,
-		minCongestionWindowPackets: minCongestionWindowPackets,
-		maxCongestionWindowPackets: maxCongestionWindowPackets,
-		slowStartThreshold:         initialSlowStartThreshold,
-		initialSlowStartThreshold:  initialSlowStartThreshold,
-		minSlowStartThreshold:      minSlowStartThreshold,
-		maxSlowStartThreshold:      maxSlowStartThreshold,
+		slowStartThreshold:         protocol.MaxByteCount,
 		cubic:                      NewCubic(clock),
 		clock:                      clock,
 		reno:                       reno,
@@ -151,16 +120,16 @@ func (c *cubicSender) TimeUntilSend(_ protocol.ByteCount) time.Time {
 	return c.pacer.TimeUntilSend()
 }
 
-func (c *cubicSender) HasPacingBudget() bool {
-	return c.pacer.Budget(c.clock.Now()) >= c.maxDatagramSize
+func (c *cubicSender) HasPacingBudget(now time.Time) bool {
+	return c.pacer.Budget(now) >= c.maxDatagramSize
 }
 
 func (c *cubicSender) maxCongestionWindow() protocol.ByteCount {
-	return c.maxDatagramSize * protocol.ByteCount(c.maxCongestionWindowPackets)
+	return c.maxDatagramSize * protocol.MaxCongestionWindowPackets
 }
 
 func (c *cubicSender) minCongestionWindow() protocol.ByteCount {
-	return c.maxDatagramSize * protocol.ByteCount(c.minCongestionWindowPackets)
+	return c.maxDatagramSize * minCongestionWindowPackets
 }
 
 func (c *cubicSender) OnPacketSent(
@@ -198,7 +167,7 @@ func (c *cubicSender) MaybeExitSlowStart() {
 	if c.InSlowStart() &&
 		c.hybridSlowStart.ShouldExitSlowStart(c.rttStats.LatestRTT(), c.rttStats.MinRTT(), c.GetCongestionWindow()/c.maxDatagramSize) {
 		// exit slow start
-		c.SetSlowStartThreshold(c.congestionWindow)
+		c.slowStartThreshold = c.congestionWindow
 		c.maybeTraceStateChange(logging.CongestionStateCongestionAvoidance)
 	}
 }
@@ -236,7 +205,7 @@ func (c *cubicSender) OnPacketLost(packetNumber protocol.PacketNumber, lostBytes
 	if minCwnd := c.minCongestionWindow(); c.congestionWindow < minCwnd {
 		c.congestionWindow = minCwnd
 	}
-	c.SetSlowStartThreshold(c.congestionWindow)
+	c.slowStartThreshold = c.congestionWindow
 	c.largestSentAtLastCutback = c.largestSentPacketNumber
 	// reset packet count from congestion avoidance mode. We start
 	// counting again when we're out of recovery.
@@ -309,7 +278,7 @@ func (c *cubicSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 	}
 	c.hybridSlowStart.Restart()
 	c.cubic.Reset()
-	c.SetSlowStartThreshold(c.congestionWindow / 2)
+	c.slowStartThreshold = c.congestionWindow / 2
 	c.congestionWindow = c.minCongestionWindow()
 }
 
@@ -323,7 +292,7 @@ func (c *cubicSender) OnConnectionMigration() {
 	c.cubic.Reset()
 	c.numAckedPackets = 0
 	c.congestionWindow = c.initialCongestionWindow
-	c.SetSlowStartThreshold(c.initialSlowStartThreshold)
+	c.slowStartThreshold = c.initialMaxCongestionWindow
 }
 
 func (c *cubicSender) maybeTraceStateChange(new logging.CongestionState) {
@@ -344,17 +313,4 @@ func (c *cubicSender) SetMaxDatagramSize(s protocol.ByteCount) {
 		c.congestionWindow = c.minCongestionWindow()
 	}
 	c.pacer.SetMaxDatagramSize(s)
-}
-
-// SetSlowStartThreshold
-// set to minSlowStartThreshold if less than minSlowStartThreshold
-// set to maxSlowStartThreshold if more than maxSlowStartThreshold
-func (c *cubicSender) SetSlowStartThreshold(new protocol.ByteCount) {
-	if new < c.minSlowStartThreshold {
-		c.slowStartThreshold = c.minSlowStartThreshold
-	} else if new > c.maxSlowStartThreshold {
-		c.slowStartThreshold = c.maxSlowStartThreshold
-	} else {
-		c.slowStartThreshold = new
-	}
 }

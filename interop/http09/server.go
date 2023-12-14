@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/lucas-clemente/quic-go"
+	"github.com/quic-go/quic-go"
 )
 
 const h09alpn = "hq-interop"
@@ -40,7 +40,7 @@ type Server struct {
 	QuicConfig *quic.Config
 
 	mutex    sync.Mutex
-	listener quic.EarlyListener
+	listener *quic.EarlyListener
 }
 
 // Close closes the server.
@@ -61,7 +61,7 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
-	conn, err := quic.ListenMigratableUDP("udp", udpAddr)
+	conn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		return err
 	}
